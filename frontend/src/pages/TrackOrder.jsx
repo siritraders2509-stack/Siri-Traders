@@ -22,6 +22,7 @@ const STATUS_TO_STEP = {
   transit:      1,
   'in transit': 1,
   delivered:    2,
+  returned:     2,
 };
 
 const computeEta = (deliveryTime) => {

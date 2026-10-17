@@ -2095,6 +2095,7 @@
 .admin-order-status-pill--transit { background: #DBEAFE; color: #1E40AF; }
 .admin-order-status-pill--delivered { background: #DCFCE7; color: #166534; }
 .admin-order-status-pill--cancelled { background: #FEE2E2; color: #991B1B; }
+.admin-order-status-pill--returned { background: #FAF5FF; color: #6B21A8; }
 
 /* Invoice & Packing Slip Modal */
 .admin-invoice-modal {

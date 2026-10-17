@@ -4233,6 +4233,7 @@ const Admin = () => {
                             >
                               <option value="Preparing">Preparing (Confirmed)</option>
                               <option value="Delivered">Delivered</option>
+                              <option value="Returned">Item Returned to Warehouse</option>
                               <option value="Cancelled">Cancelled</option>
                             </select>
                           </div>
@@ -4240,16 +4241,16 @@ const Admin = () => {
                           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
                             <span style={{ fontSize: '10px', fontWeight: 800, color: '#687466', textTransform: 'uppercase', marginBottom: '2px' }}>Payment Status</span>
                             <select
-                              value={order.paymentStatus === 'Paid' ? 'Paid' : 'Unpaid'}
+                              value={['Paid', 'Unpaid', 'Refunded', 'Partially Refunded'].includes(order.paymentStatus) ? order.paymentStatus : 'Unpaid'}
                               className="admin-status-select"
                               style={{
                                 height: '30px',
                                 fontSize: '11.5px',
                                 borderRadius: '6px',
                                 fontWeight: 700,
-                                borderColor: order.paymentStatus === 'Paid' ? '#86EFAC' : (order.paymentStatus === 'Refunded' ? '#D8B4FE' : '#FCA5A5'),
-                                background: order.paymentStatus === 'Paid' ? '#F0FDF4' : (order.paymentStatus === 'Refunded' ? '#FAF5FF' : '#FEF2F2'),
-                                color: order.paymentStatus === 'Paid' ? '#166534' : (order.paymentStatus === 'Refunded' ? '#6B21A8' : '#991B1B')
+                                borderColor: order.paymentStatus === 'Paid' ? '#86EFAC' : (order.paymentStatus === 'Refunded' || order.paymentStatus === 'Partially Refunded' ? '#D8B4FE' : '#FCA5A5'),
+                                background: order.paymentStatus === 'Paid' ? '#F0FDF4' : (order.paymentStatus === 'Refunded' || order.paymentStatus === 'Partially Refunded' ? '#FAF5FF' : '#FEF2F2'),
+                                color: order.paymentStatus === 'Paid' ? '#166534' : (order.paymentStatus === 'Refunded' || order.paymentStatus === 'Partially Refunded' ? '#6B21A8' : '#991B1B')
                               }}
                               onChange={(e) => {
                                 const newPayment = e.target.value;
@@ -4258,6 +4259,8 @@ const Admin = () => {
                             >
                               <option value="Paid">🟢 Paid</option>
                               <option value="Unpaid">🔴 Unpaid</option>
+                              <option value="Refunded">🟣 Refunded</option>
+                              <option value="Partially Refunded">🟣 Partially Refunded</option>
                             </select>
                           </div>
 
@@ -4392,6 +4395,7 @@ const Admin = () => {
                             >
                               <option value="Preparing">Preparing (Order Confirmed)</option>
                               <option value="Delivered">Delivered</option>
+                              <option value="Returned">Item Returned to Warehouse</option>
                               <option value="Cancelled">Cancelled</option>
                             </select>
                           </div>
@@ -4399,16 +4403,16 @@ const Admin = () => {
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                             <span style={{ fontSize: '11.5px', fontWeight: 700, color: '#687466' }}>Payment Status:</span>
                             <select
-                              value={selectedOrderModal.paymentStatus === 'Paid' ? 'Paid' : 'Unpaid'}
+                              value={['Paid', 'Unpaid', 'Refunded', 'Partially Refunded'].includes(selectedOrderModal.paymentStatus) ? selectedOrderModal.paymentStatus : 'Unpaid'}
                               className="admin-status-select"
                               style={{
                                 height: '32px',
                                 fontSize: '12px',
                                 borderRadius: '6px',
                                 fontWeight: 700,
-                                borderColor: selectedOrderModal.paymentStatus === 'Paid' ? '#86EFAC' : (selectedOrderModal.paymentStatus === 'Refunded' ? '#D8B4FE' : '#FCA5A5'),
-                                background: selectedOrderModal.paymentStatus === 'Paid' ? '#F0FDF4' : (selectedOrderModal.paymentStatus === 'Refunded' ? '#FAF5FF' : '#FEF2F2'),
-                                color: selectedOrderModal.paymentStatus === 'Paid' ? '#166534' : (selectedOrderModal.paymentStatus === 'Refunded' ? '#6B21A8' : '#991B1B')
+                                borderColor: selectedOrderModal.paymentStatus === 'Paid' ? '#86EFAC' : (selectedOrderModal.paymentStatus === 'Refunded' || selectedOrderModal.paymentStatus === 'Partially Refunded' ? '#D8B4FE' : '#FCA5A5'),
+                                background: selectedOrderModal.paymentStatus === 'Paid' ? '#F0FDF4' : (selectedOrderModal.paymentStatus === 'Refunded' || selectedOrderModal.paymentStatus === 'Partially Refunded' ? '#FAF5FF' : '#FEF2F2'),
+                                color: selectedOrderModal.paymentStatus === 'Paid' ? '#166534' : (selectedOrderModal.paymentStatus === 'Refunded' || selectedOrderModal.paymentStatus === 'Partially Refunded' ? '#6B21A8' : '#991B1B')
                               }}
                               onChange={(e) => {
                                 const newPayment = e.target.value;
@@ -4416,6 +4420,8 @@ const Admin = () => {
                               }}
                             >
                               <option value="Paid">🟢 Paid</option>
+                              <option value="Refunded">🟣 Refunded</option>
+                              <option value="Partially Refunded">🟣 Partially Refunded</option>
                               <option value="Unpaid">🔴 Unpaid</option>
                             </select>
                           </div>

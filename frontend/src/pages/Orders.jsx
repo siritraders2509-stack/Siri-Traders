@@ -224,6 +224,7 @@ const Orders = () => {
       case 'placed': return { bg: '#FEF3C7', color: '#92400E', label: 'Order Placed' };
       case 'paid': return { bg: '#D8F3DC', color: '#1B4332', label: 'Paid' };
       case 'cancelled': return { bg: '#FEE2E2', color: '#991B1B', label: 'Cancelled' };
+      case 'returned': return { bg: '#FAF5FF', color: '#6B21A8', label: 'Returned' };
       default: return { bg: '#E5E7EB', color: '#6B7280', label: status || 'Order Placed' };
     }
   };
