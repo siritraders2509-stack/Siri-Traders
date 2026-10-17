@@ -284,6 +284,8 @@
 .track__btn--primary:hover { background: #F0B400; }
 .track__btn--secondary { background: #FFFFFF; color: #2D5016; border: 1.5px solid rgba(45,80,22,0.25); }
 .track__btn--secondary:hover { background: #F1F8E9; }
+.track__btn--danger { background: #FFFFFF; color: #DC2626; border: 1.5px solid rgba(220,38,38,0.35); }
+.track__btn--danger:hover { background: #FEF2F2; }
 
 /* Not found */
 .track__not-found {

@@ -44,7 +44,7 @@ export default async function handler(req, res) {
 
   // ── Item: /api/orders?id=:id — single order, ownership-checked ───────────
   if (id) {
-    if (req.method !== 'GET') {
+    if (req.method !== 'GET' && req.method !== 'PATCH') {
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
@@ -68,9 +68,81 @@ export default async function handler(req, res) {
         return res.status(403).json({ error: 'Forbidden: You do not own this order' });
       }
 
-      const { data: items, error: itemsErr } = await supabase.from('order_items').select('*').eq('order_id', order.id);
-      throwIfError(itemsErr);
-      return res.status(200).json({ ...toCamelRow(order), items: toCamelRows(items) });
+      if (req.method === 'GET') {
+        const { data: items, error: itemsErr } = await supabase.from('order_items').select('*').eq('order_id', order.id);
+        throwIfError(itemsErr);
+        return res.status(200).json({ ...toCamelRow(order), items: toCamelRows(items) });
+      }
+
+      // PATCH — customer self-service: cancel (before shipping) or request a
+      // return (after delivery). Deliberately narrow: a customer can only
+      // trigger these two specific transitions on their own order, never set
+      // status/paymentStatus/returnStatus directly the way the admin
+      // endpoint can.
+      const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
+      const action = body.action;
+
+      if (action === 'cancel') {
+        if (!['Preparing', 'Paid'].includes(order.status)) {
+          return res.status(400).json({ error: 'This order can no longer be cancelled — it has already shipped or been delivered.' });
+        }
+
+        const { data: updatedRows, error: updErr } = await supabase.from('orders').update({
+          status: 'Cancelled',
+          cancellation_reason: body.reason || 'Cancelled by customer',
+          cancelled_at: new Date().toISOString(),
+          payment_status: order.payment_status === 'Paid' ? 'Unpaid' : order.payment_status,
+        }).eq('id', parsedId).select();
+        throwIfError(updErr);
+
+        // Best-effort restock, mirroring the admin cancellation path.
+        try {
+          const { data: items } = await supabase.from('order_items').select('*').eq('order_id', parsedId);
+          for (const item of (items || [])) {
+            if (!item.product_id) continue;
+            const { data: inv } = await supabase.from('inventory').select('*').eq('product_id', item.product_id).maybeSingle();
+            if (inv) {
+              const newStock = (inv.available_stock || 0) + (item.quantity || 1);
+              await supabase.from('inventory').update({ available_stock: newStock }).eq('product_id', item.product_id);
+              await supabase.from('inventory_logs').insert({
+                product_id: item.product_id,
+                product_name: item.name,
+                change_type: 'RETURN',
+                quantity: item.quantity || 1,
+                stock_before: inv.available_stock || 0,
+                stock_after: newStock,
+                reason: `Order #${parsedId} cancelled by customer`,
+                admin_name: 'Customer',
+              });
+            }
+          }
+        } catch (restockErr) {
+          console.warn('Restock warning on customer cancellation:', restockErr.message);
+        }
+
+        const { data: items } = await supabase.from('order_items').select('*').eq('order_id', parsedId);
+        return res.status(200).json({ ...toCamelRow(updatedRows[0]), items: toCamelRows(items) });
+      }
+
+      if (action === 'return') {
+        if (order.status !== 'Delivered') {
+          return res.status(400).json({ error: 'Only delivered orders can be returned.' });
+        }
+        if (order.return_status && order.return_status !== 'None') {
+          return res.status(400).json({ error: 'A return has already been requested for this order.' });
+        }
+
+        const { data: updatedRows, error: updErr } = await supabase.from('orders').update({
+          return_status: 'Requested',
+          return_reason: body.reason || 'Customer requested return',
+        }).eq('id', parsedId).select();
+        throwIfError(updErr);
+
+        const { data: items } = await supabase.from('order_items').select('*').eq('order_id', parsedId);
+        return res.status(200).json({ ...toCamelRow(updatedRows[0]), items: toCamelRows(items) });
+      }
+
+      return res.status(400).json({ error: 'Invalid action. Use "cancel" or "return".' });
     } catch (error) {
       console.error("Error in /api/orders?id:", error);
       return res.status(500).json({ error: 'Something went wrong. Please try again shortly.' });

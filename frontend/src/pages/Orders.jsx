@@ -22,6 +22,11 @@ const Orders = () => {
   const [reviewForm, setReviewForm] = useState({ rating: 5, title: '', comment: '' });
   const [reviewSubmitting, setReviewSubmitting] = useState(false);
   const [reviewError, setReviewError] = useState('');
+  const [returnModal, setReturnModal] = useState(null); // order object
+  const [returnReason, setReturnReason] = useState('');
+  const [returnSubmitting, setReturnSubmitting] = useState(false);
+  const [returnError, setReturnError] = useState('');
+  const [returnedIds, setReturnedIds] = useState(new Set());
 
   // Real products are reviewed once per product (covers every order); combo/
   // festive-offer items have no shared product identity, so they're keyed by
@@ -80,6 +85,37 @@ const Orders = () => {
       setReviewError('Network error. Please try again.');
     } finally {
       setReviewSubmitting(false);
+    }
+  };
+
+  const openReturnModal = (order) => {
+    setReturnReason('');
+    setReturnError('');
+    setReturnModal(order);
+  };
+
+  const submitReturn = async () => {
+    if (!returnModal || typeof getToken !== 'function') return;
+    setReturnSubmitting(true);
+    setReturnError('');
+    try {
+      const token = await getToken();
+      const res = await fetch(`/api/orders?id=${encodeURIComponent(returnModal.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'return', reason: returnReason }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setReturnError(data.error || 'Failed to request return.');
+        return;
+      }
+      setReturnedIds(prev => new Set(prev).add(returnModal.id));
+      setReturnModal(null);
+    } catch {
+      setReturnError('Network error. Please try again.');
+    } finally {
+      setReturnSubmitting(false);
     }
   };
 
@@ -161,7 +197,8 @@ const Orders = () => {
       payment: order.paymentMethod || 'COD',
       address: { address: order.deliveryAddress },
       items: order.items || [],
-      total: order.total
+      total: order.total,
+      returnStatus: order.returnStatus || 'None'
     };
   }) : localOrders.map(order => {
     let rawId = order.id;
@@ -319,6 +356,22 @@ const Orders = () => {
                             <FiRefreshCw /> {reordered === order.id ? 'Added to Cart!' : 'Reorder'}
                           </button>
                         </div>
+                        {order.status === 'delivered' && (order.returnStatus === 'None') && !returnedIds.has(order.id) && (
+                          <div className="orders__detail-actions">
+                            <button
+                              className="orders__track-btn"
+                              style={{ color: '#DC2626', borderColor: 'rgba(220,38,38,0.35)' }}
+                              onClick={() => openReturnModal(order)}
+                            >
+                              Return Order
+                            </button>
+                          </div>
+                        )}
+                        {(order.returnStatus && order.returnStatus !== 'None') || returnedIds.has(order.id) ? (
+                          <div className="orders__reviewed-badge" style={{ marginTop: '8px' }}>
+                            <FiCheckCircle size={12} /> Return {returnedIds.has(order.id) ? 'requested' : order.returnStatus?.toLowerCase()}
+                          </div>
+                        ) : null}
                       </div>
                     )}
                   </div>
@@ -406,6 +459,41 @@ const Orders = () => {
               onClick={submitReview}
             >
               {reviewSubmitting ? 'Submitting...' : 'Submit Review'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {returnModal && (
+        <div className="orders__review-backdrop" onClick={() => !returnSubmitting && setReturnModal(null)}>
+          <div className="orders__review-modal" onClick={e => e.stopPropagation()}>
+            <div className="orders__review-modal-header">
+              <h3>Request a Return</h3>
+              <button className="orders__review-close" onClick={() => setReturnModal(null)} aria-label="Close">
+                <FiX />
+              </button>
+            </div>
+            <p className="orders__review-product">Order #{returnModal.id}</p>
+
+            <textarea
+              className="orders__review-textarea"
+              placeholder="Tell us why you'd like to return this order (optional)"
+              rows={4}
+              value={returnReason}
+              onChange={e => setReturnReason(e.target.value)}
+              maxLength={500}
+            />
+
+            {returnError && <p className="orders__review-error">{returnError}</p>}
+
+            <button
+              type="button"
+              className="orders__review-submit"
+              style={{ background: '#DC2626' }}
+              disabled={returnSubmitting}
+              onClick={submitReturn}
+            >
+              {returnSubmitting ? 'Submitting...' : 'Submit Return Request'}
             </button>
           </div>
         </div>

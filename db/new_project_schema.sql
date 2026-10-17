@@ -1,5 +1,5 @@
 -- Siri Traders — full schema for a fresh Supabase project.
--- Run this once in the new project's SQL Editor (Project: hwssutntkdqswyudeqtz).
+-- Run this once in the new project's SQL Editor (Project: pjckcxslwbytkdmctgmr).
 -- Order respects foreign key dependencies (categories/orders before the
 -- tables that reference them).
 

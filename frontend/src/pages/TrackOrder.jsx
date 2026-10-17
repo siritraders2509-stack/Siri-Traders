@@ -50,6 +50,9 @@ const TrackOrder = () => {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [loadError, setLoadError] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState('');
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
 
   const applyOrder = useCallback((found) => {
     setOrder(found);
@@ -134,6 +137,31 @@ const TrackOrder = () => {
     setNotFound(true);
     setLoading(false);
   }, [orderId, user, location.state, isAuthenticated, getToken, applyOrder]);
+
+  const cancelOrder = async () => {
+    if (!order || typeof getToken !== 'function') return;
+    setCancelling(true);
+    setCancelError('');
+    try {
+      const token = await getToken();
+      const res = await fetch(`/api/orders?id=${encodeURIComponent(order.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ action: 'cancel' }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setCancelError(data.error || 'Failed to cancel order.');
+        return;
+      }
+      setShowCancelConfirm(false);
+      await refreshOrder(false);
+    } catch {
+      setCancelError('Network error. Please try again.');
+    } finally {
+      setCancelling(false);
+    }
+  };
 
   useEffect(() => {
     // Wait for Clerk to finish restoring the session — otherwise a reload
@@ -358,8 +386,49 @@ const TrackOrder = () => {
             </button>
           </div>
 
+          {['Preparing', 'Paid'].includes(order.status) && (
+            <div className="track__actions">
+              <button
+                className="track__btn track__btn--danger"
+                onClick={() => { setCancelError(''); setShowCancelConfirm(true); }}
+              >
+                Cancel Order
+              </button>
+            </div>
+          )}
+
         </div>
       </div>
+
+      {showCancelConfirm && (
+        <div className="orders__review-backdrop" onClick={() => !cancelling && setShowCancelConfirm(false)}>
+          <div className="orders__review-modal" onClick={e => e.stopPropagation()}>
+            <div className="orders__review-modal-header">
+              <h3>Cancel this order?</h3>
+            </div>
+            <p className="orders__review-product">This can't be undone. Order #{order.id} will be cancelled.</p>
+            {cancelError && <p className="orders__review-error">{cancelError}</p>}
+            <button
+              type="button"
+              className="orders__review-submit"
+              style={{ background: '#DC2626' }}
+              disabled={cancelling}
+              onClick={cancelOrder}
+            >
+              {cancelling ? 'Cancelling...' : 'Yes, Cancel Order'}
+            </button>
+            <button
+              type="button"
+              className="track__btn track__btn--secondary"
+              style={{ width: '100%', marginTop: '8px' }}
+              disabled={cancelling}
+              onClick={() => setShowCancelConfirm(false)}
+            >
+              Keep Order
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
