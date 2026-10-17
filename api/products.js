@@ -1,12 +1,7 @@
-import { db, products, categories, inventory, orderItems, reviews } from '../db/index.js';
-import { eq, and, or, sql } from 'drizzle-orm';
+import { getSupabase, toSnakeRow, toCamelRow, toCamelRows, throwIfError } from '../db/supabase.js';
 import { z } from 'zod';
 import { setCorsHeaders } from './_cors.js';
 import { isAdminRequest } from './_adminAuth.js';
-
-// A little more headroom for a batch of "add another item" saves and the
-// occasional schema auto-migration — avoids the function getting cut mid-write.
-export const config = { maxDuration: 30 };
 
 const productSchema = z.object({
   name: z.string().min(1),
@@ -47,38 +42,6 @@ const productSchema = z.object({
 });
 
 const productUpdateSchema = productSchema.partial();
-
-let productsMigrated = false;
-
-async function autoMigrateProductsSchema() {
-  if (productsMigrated) return;
-  try {
-    await db.execute(sql`
-      ALTER TABLE products
-      ADD COLUMN IF NOT EXISTS target_type VARCHAR(32) DEFAULT 'retail_and_wholesale',
-      ADD COLUMN IF NOT EXISTS is_bestseller BOOLEAN DEFAULT FALSE,
-      ADD COLUMN IF NOT EXISTS is_todays_deal BOOLEAN DEFAULT FALSE,
-      ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE,
-      ADD COLUMN IF NOT EXISTS is_published BOOLEAN DEFAULT TRUE,
-      ADD COLUMN IF NOT EXISTS delivery_time VARCHAR(64) DEFAULT '15 mins',
-      ADD COLUMN IF NOT EXISTS cost_price INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS gst_rate INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS sku TEXT,
-      ADD COLUMN IF NOT EXISTS barcode TEXT,
-      ADD COLUMN IF NOT EXISTS subcategory TEXT,
-      ADD COLUMN IF NOT EXISTS pack_size TEXT,
-      ADD COLUMN IF NOT EXISTS wholesale_price INTEGER,
-      ADD COLUMN IF NOT EXISTS bulk_pack_label TEXT,
-      ADD COLUMN IF NOT EXISTS bulk_pack_price INTEGER,
-      ADD COLUMN IF NOT EXISTS wholesale_case_label TEXT,
-      ADD COLUMN IF NOT EXISTS wholesale_case_price INTEGER,
-      ADD COLUMN IF NOT EXISTS variants JSONB;
-    `);
-    productsMigrated = true;
-  } catch (err) {
-    console.warn("Auto-migration products schema failed:", err.message);
-  }
-}
 
 function normalizeProductPayload(body) {
   if (!body || typeof body !== 'object') return {};
@@ -121,12 +84,14 @@ export default async function handler(req, res) {
   }
 
   const { id, resource, action } = req.query;
+  const supabase = getSupabase();
 
   try {
     // ── Product image as binary: /api/products?resource=image&id=:id
     if (resource === 'image' && id && req.method === 'GET') {
-      const row = (await db.select({ image: products.image }).from(products).where(eq(products.id, parseInt(id, 10))))[0];
-      const m = /^data:([^;]+);base64,(.+)$/s.exec(row?.image || '');
+      const { data, error } = await supabase.from('products').select('image').eq('id', parseInt(id, 10)).maybeSingle();
+      throwIfError(error);
+      const m = /^data:([^;]+);base64,(.+)$/s.exec(data?.image || '');
       if (!m) return res.status(404).end();
       res.setHeader('Content-Type', m[1]);
       res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400, stale-while-revalidate=604800');
@@ -137,9 +102,10 @@ export default async function handler(req, res) {
     if (resource === 'categories' || action === 'categories') {
       if (!id) {
         if (req.method === 'GET') {
-          const allCategories = await db.select().from(categories);
+          const { data, error } = await supabase.from('categories').select('*');
+          throwIfError(error);
           res.setHeader('Cache-Control', 'public, max-age=0, s-maxage=10, stale-while-revalidate=30');
-          return res.status(200).json(allCategories);
+          return res.status(200).json(toCamelRows(data));
         }
 
         if (req.method === 'POST') {
@@ -154,15 +120,16 @@ export default async function handler(req, res) {
           }
 
           const catId = body.id || name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-          const saved = await db.insert(categories).values({
+          const { data, error } = await supabase.from('categories').insert({
             id: catId,
             name,
             image: body.image || '',
             color: body.color || '#F1F8E9',
-            itemCount: 0
-          }).returning();
+            item_count: 0
+          }).select();
+          throwIfError(error);
 
-          return res.status(201).json(saved[0]);
+          return res.status(201).json(toCamelRow(data[0]));
         }
       } else {
         if (req.method === 'DELETE') {
@@ -170,15 +137,16 @@ export default async function handler(req, res) {
           if (!adminOk) return res.status(403).json({ error: 'Forbidden: admin access required' });
 
           const catId = String(id).trim();
-          const targetCat = await db.select().from(categories).where(eq(categories.id, catId));
-          const catName = targetCat[0]?.name;
+          const { data: targetCat } = await supabase.from('categories').select('name').eq('id', catId).maybeSingle();
+          const catName = targetCat?.name;
 
-          await db.delete(products).where(
-            catName
-              ? or(eq(products.category, catId), eq(products.category, catName))
-              : eq(products.category, catId)
-          );
-          await db.delete(categories).where(eq(categories.id, catId));
+          const delProducts = catName
+            ? supabase.from('products').delete().or(`category.eq.${catId},category.eq.${catName}`)
+            : supabase.from('products').delete().eq('category', catId);
+          await delProducts;
+
+          const { error } = await supabase.from('categories').delete().eq('id', catId);
+          throwIfError(error);
           return res.status(200).json({ success: true, id: catId });
         }
       }
@@ -198,38 +166,31 @@ export default async function handler(req, res) {
         const parsedLimit = Math.min(1000, Math.max(1, limitVal));
         const parsedOffset = Math.max(0, offsetVal);
 
-        let query = db.select().from(products);
-        const conditions = [];
+        let query = supabase.from('products').select('*');
 
         if (category) {
-          conditions.push(eq(products.category, category));
+          query = query.eq('category', category);
         }
-
         if (includeArchived !== 'true') {
-          conditions.push(eq(products.isArchived, false));
+          query = query.eq('is_archived', false);
         }
-
         // Public/storefront requests only see published products.
         // Admin fetches pass includeUnpublished=true to see everything.
         if (includeUnpublished !== 'true') {
-          conditions.push(eq(products.isPublished, true));
+          query = query.eq('is_published', true);
         }
 
-        if (conditions.length === 1) {
-          query = query.where(conditions[0]);
-        } else if (conditions.length > 1) {
-          query = query.where(and(...conditions));
-        }
+        const { data, error } = await query.range(parsedOffset, parsedOffset + parsedLimit - 1);
+        throwIfError(error);
 
-        const allProducts = await query.limit(parsedLimit).offset(parsedOffset);
-        // Storefront lists are cached at Vercel's edge for a short window so a
+        // Storefront lists are cached at the edge for a short window so a
         // newly-saved product shows up quickly (worst case ~40s); admin lists
         // (archived/unpublished included) always hit the DB.
         const isAdminList = includeArchived === 'true' || includeUnpublished === 'true';
         res.setHeader('Cache-Control', isAdminList
           ? 'private, no-store'
           : 'public, max-age=0, s-maxage=10, stale-while-revalidate=30');
-        return res.status(200).json(allProducts.map(slimImage));
+        return res.status(200).json(toCamelRows(data).map(slimImage));
       }
 
 
@@ -246,17 +207,9 @@ export default async function handler(req, res) {
           return res.status(400).json({ error: 'Validation failed', details: validationResult.error.errors });
         }
 
-        await autoMigrateProductsSchema();
-        let newProduct;
-        try {
-          newProduct = await db.insert(products).values(validationResult.data).returning();
-        } catch (insertErr) {
-          console.warn("Retrying products insert after auto-migration...", insertErr.message);
-          productsMigrated = false;
-          await autoMigrateProductsSchema();
-          newProduct = await db.insert(products).values(validationResult.data).returning();
-        }
-        return res.status(201).json(newProduct[0]);
+        const { data, error } = await supabase.from('products').insert(toSnakeRow(validationResult.data)).select();
+        throwIfError(error);
+        return res.status(201).json(toCamelRow(data[0]));
       }
 
       return res.status(405).json({ error: 'Method not allowed' });
@@ -269,12 +222,13 @@ export default async function handler(req, res) {
     }
 
     if (req.method === 'GET') {
-      const result = await db.select().from(products).where(eq(products.id, parsedId));
-      if (!result.length) {
+      const { data, error } = await supabase.from('products').select('*').eq('id', parsedId).maybeSingle();
+      throwIfError(error);
+      if (!data) {
         return res.status(404).json({ error: 'Product not found' });
       }
       res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
-      return res.status(200).json(slimImage(result[0]));
+      return res.status(200).json(slimImage(toCamelRow(data)));
     }
 
     if (req.method === 'PUT') {
@@ -288,50 +242,35 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Validation failed', details: validation.error.errors });
       }
 
-      await autoMigrateProductsSchema();
-
-      const existing = await db.select().from(products).where(eq(products.id, parsedId));
-      if (!existing.length) {
+      const { data: existing } = await supabase.from('products').select('id').eq('id', parsedId).maybeSingle();
+      if (!existing) {
         return res.status(404).json({ error: 'Product not found' });
       }
 
-      let updated;
-      try {
-        updated = await db
-          .update(products)
-          .set(validation.data)
-          .where(eq(products.id, parsedId))
-          .returning();
-      } catch (updateErr) {
-        console.warn("Retrying products update after auto-migration...", updateErr.message);
-        productsMigrated = false;
-        await autoMigrateProductsSchema();
-        updated = await db
-          .update(products)
-          .set(validation.data)
-          .where(eq(products.id, parsedId))
-          .returning();
-      }
+      const { data, error } = await supabase.from('products').update(toSnakeRow(validation.data)).eq('id', parsedId).select();
+      throwIfError(error);
 
-      return res.status(200).json(updated[0]);
+      return res.status(200).json(toCamelRow(data[0]));
     }
 
     if (req.method === 'DELETE') {
       const adminOk = await isAdminRequest(req);
       if (!adminOk) return res.status(403).json({ error: 'Forbidden: admin access required' });
 
-      const existing = await db.select().from(products).where(eq(products.id, parsedId));
-      if (!existing.length) {
+      const { data: existing } = await supabase.from('products').select('id').eq('id', parsedId).maybeSingle();
+      if (!existing) {
         return res.status(404).json({ error: 'Product not found' });
       }
 
       try {
-        await db.transaction(async (tx) => {
-          await tx.update(orderItems).set({ productId: null }).where(eq(orderItems.productId, parsedId)).catch(() => {});
-          await tx.update(reviews).set({ productId: null }).where(eq(reviews.productId, parsedId)).catch(() => {});
-          await tx.delete(inventory).where(eq(inventory.productId, parsedId)).catch(() => {});
-          await tx.delete(products).where(eq(products.id, parsedId));
-        });
+        // PostgREST has no multi-statement transaction — these run
+        // sequentially instead. Same practical effect since the first
+        // three were already best-effort (wrapped to ignore failures).
+        await supabase.from('order_items').update({ product_id: null }).eq('product_id', parsedId);
+        await supabase.from('reviews').update({ product_id: null }).eq('product_id', parsedId);
+        await supabase.from('inventory').delete().eq('product_id', parsedId);
+        const { error } = await supabase.from('products').delete().eq('id', parsedId);
+        throwIfError(error);
         return res.status(200).json({ success: true, id: parsedId });
       } catch (delErr) {
         console.error('Error deleting product from database:', delErr);

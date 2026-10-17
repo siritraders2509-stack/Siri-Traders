@@ -1,34 +1,12 @@
 import { db, deliveryZones } from '../db/index.js';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { setCorsHeaders } from './_cors.js';
 import { isAdminRequest } from './_adminAuth.js';
 
-let zonesMigrated = false;
-
-async function autoMigrateDeliveryZonesSchema() {
-  if (zonesMigrated) return;
-  try {
-    await db.execute(sql`
-      CREATE TABLE IF NOT EXISTS delivery_zones (
-        id TEXT PRIMARY KEY,
-        area TEXT NOT NULL,
-        pincode TEXT NOT NULL,
-        time TEXT NOT NULL,
-        distance TEXT,
-        active BOOLEAN DEFAULT true,
-        delivery_fee INTEGER DEFAULT 0 NOT NULL,
-        free_delivery_threshold INTEGER DEFAULT 0 NOT NULL,
-        handling_charge INTEGER DEFAULT 0 NOT NULL,
-        min_order_value INTEGER DEFAULT 0,
-        delivery_slots JSONB DEFAULT '[]'::jsonb,
-        driver_assigned TEXT
-      );
-    `);
-    zonesMigrated = true;
-  } catch (err) {
-    console.warn("Auto-migration delivery_zones failed:", err.message);
-  }
-}
+// The one-time `CREATE TABLE IF NOT EXISTS delivery_zones` that used to run
+// here has long since applied in production — re-checking it on every cold
+// Workers isolate burns a real Hyperdrive query for no benefit, which is
+// exactly what exhausted the daily Hyperdrive quota. Removed.
 
 const DEFAULT_14_ZONES = [
   { id: 'zone-1', area: 'Isnapur', pincode: '502307', time: '15-30 mins', distance: '0-3 km', active: true, deliveryFee: 0, freeDeliveryThreshold: 299, handlingCharge: 0, minOrderValue: 100 },
@@ -52,8 +30,6 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
-
-  await autoMigrateDeliveryZonesSchema();
 
   if (req.method === 'GET') {
     try {

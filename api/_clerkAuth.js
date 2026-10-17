@@ -9,20 +9,37 @@
 
 import { createClerkClient, verifyToken } from '@clerk/backend';
 
-const CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY;
-// Clerk publishable key - may be set under either name
-const CLERK_PUBLISHABLE_KEY =
-  process.env.CLERK_PUBLISHABLE_KEY ||
-  process.env.VITE_CLERK_PUBLISHABLE_KEY ||
-  'pk_test_bmV4dC1sb25naG9ybi00Ny5jbGVyay5hY2NvdW50cy5kZXYk';
+function keys() {
+  return {
+    secretKey: process.env.CLERK_SECRET_KEY,
+    // Clerk publishable key - may be set under either name
+    publishableKey:
+      process.env.CLERK_PUBLISHABLE_KEY ||
+      process.env.VITE_CLERK_PUBLISHABLE_KEY ||
+      'pk_test_bmV4dC1sb25naG9ybi00Ny5jbGVyay5hY2NvdW50cy5kZXYk',
+  };
+}
 
-export const clerk = createClerkClient({
-  secretKey: CLERK_SECRET_KEY,
-  publishableKey: CLERK_PUBLISHABLE_KEY,
+// Built lazily (on first use within a request), not at module load — on
+// Workers, env vars/secrets only exist once a request is being handled, so
+// reading process.env at module scope (as this used to) would see nothing.
+let _clerk = null;
+function realClerk() {
+  if (!_clerk) _clerk = createClerkClient(keys());
+  return _clerk;
+}
+
+// Stable, importable singleton — call sites keep doing `clerk.users.getUser(...)`
+// unchanged; this forwards to the real client once it's been built.
+export const clerk = new Proxy(/** @type {any} */ ({}), {
+  get(_target, prop) {
+    return realClerk()[prop];
+  }
 });
 
 export async function getAuthenticatedUserId(req) {
-  if (!CLERK_SECRET_KEY) {
+  const { secretKey, publishableKey } = keys();
+  if (!secretKey) {
     console.error('getAuthenticatedUserId: CLERK_SECRET_KEY is not set');
     return null;
   }
@@ -40,8 +57,8 @@ export async function getAuthenticatedUserId(req) {
     // Use verifyToken with the publishable key as the issuer so Clerk SDK
     // can fetch JWKS and verify the signature
     const payload = await verifyToken(token, {
-      secretKey: CLERK_SECRET_KEY,
-      publishableKey: CLERK_PUBLISHABLE_KEY,
+      secretKey,
+      publishableKey,
     });
 
     if (!payload || !payload.sub) {

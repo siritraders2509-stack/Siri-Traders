@@ -729,10 +729,6 @@ const Admin = () => {
     try {
       const usersList = await adminApi.fetchAllUsers();
       setLiveCustomers(usersList);
-      if (Array.isArray(usersList)) {
-        const emails = usersList.map(u => u.email).filter(Boolean);
-        setSelectedBroadcastEmails(emails);
-      }
     } catch (err) {
       console.error('Failed to load customers:', err);
     }
@@ -873,10 +869,19 @@ const Admin = () => {
       loadReviews();
     } else if (activeTab === 'promotions') {
       loadCoupons();
+      // Was 5s — on Workers+Hyperdrive, every poll opens a fresh DB
+      // connection (unlike Vercel's pooled model), so this alone could
+      // burn ~17k Hyperdrive queries/day from a single open tab. 60s is
+      // still responsive enough for a coupons list that rarely changes.
       const interval = setInterval(() => {
         loadCoupons();
-      }, 5000);
+      }, 60000);
       return () => clearInterval(interval);
+    } else if (activeTab === 'broadcast' && selectedBroadcastEmails.length === 0) {
+      // Default to "all customers" only when nothing's been picked yet —
+      // e.g. arriving here via the Customer Hub's "Message" button already
+      // set a single recipient, which this must not clobber.
+      selectBroadcastSegment('all');
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, inventoryFilter, loadCoupons]);
@@ -923,7 +928,12 @@ const Admin = () => {
       } catch (err) {
         console.error("Order polling failed:", err);
       }
-    }, 10000);
+      // Was 10s, runs the whole time an admin is logged in (even
+      // backgrounded) — on Workers+Hyperdrive, every poll opens a fresh DB
+      // connection, so this was the single biggest contributor to
+      // exhausting the daily Hyperdrive quota. 45s still surfaces new
+      // orders promptly without that cost.
+    }, 45000);
 
     return () => clearInterval(interval);
   }, [adminSession, adminApi]);

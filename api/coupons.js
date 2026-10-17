@@ -1,5 +1,5 @@
 import { db, coupons } from '../db/index.js';
-import { eq, or, sql } from 'drizzle-orm';
+import { eq, or } from 'drizzle-orm';
 import { setCorsHeaders } from './_cors.js';
 import { isAdminRequest } from './_adminAuth.js';
 
@@ -12,35 +12,12 @@ const safeInt = (val, fallback = 0) => {
   return Math.max(0, Math.min(MAX_PG_INT, num));
 };
 
-let couponsMigrated = false;
-
-async function autoMigrateCouponsSchema() {
-  if (couponsMigrated) return;
-  try {
-    await db.execute(sql`
-      ALTER TABLE coupons
-      ADD COLUMN IF NOT EXISTS buy_quantity INTEGER DEFAULT 1,
-      ADD COLUMN IF NOT EXISTS get_quantity INTEGER DEFAULT 1,
-      ADD COLUMN IF NOT EXISTS target_type VARCHAR(32) DEFAULT 'all',
-      ADD COLUMN IF NOT EXISTS target_category VARCHAR(128),
-      ADD COLUMN IF NOT EXISTS target_product_id INTEGER,
-      ADD COLUMN IF NOT EXISTS target_customer_email VARCHAR(255),
-      ADD COLUMN IF NOT EXISTS usage_limit INTEGER,
-      ADD COLUMN IF NOT EXISTS per_user_limit INTEGER DEFAULT 1,
-      ADD COLUMN IF NOT EXISTS times_used INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS total_discount_given INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS start_date VARCHAR(32),
-      ADD COLUMN IF NOT EXISTS end_date VARCHAR(32),
-      ADD COLUMN IF NOT EXISTS title VARCHAR(255),
-      ADD COLUMN IF NOT EXISTS description TEXT,
-      ADD COLUMN IF NOT EXISTS customer_type VARCHAR(32) DEFAULT 'retail',
-      ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true;
-    `);
-    couponsMigrated = true;
-  } catch (err) {
-    console.warn("Auto-migration coupons schema failed:", err.message);
-  }
-}
+// The one-time schema migration that used to run here (adding bulk-pricing
+// /targeting columns to `coupons`) has long since applied in production —
+// re-checking it via ALTER TABLE on every cold Workers isolate burns a real
+// Hyperdrive query for no benefit, which is exactly what exhausted the
+// daily Hyperdrive quota. Removed; if a genuinely new column is ever
+// needed, add it as a real migration instead of a runtime guard like this.
 
 export default async function handler(req, res) {
   setCorsHeaders(req, res);
@@ -49,7 +26,6 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  await autoMigrateCouponsSchema();
   const targetId = req.query.id || (typeof req.body === 'object' ? req.body?.id : null);
 
   if (req.method === 'GET') {

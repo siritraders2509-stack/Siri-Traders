@@ -1,5 +1,4 @@
-import { db, categories, products } from '../db/index.js';
-import { eq, or } from 'drizzle-orm';
+import { getSupabase, toCamelRow, toCamelRows } from '../db/supabase.js';
 import { setCorsHeaders } from './_cors.js';
 import { isAdminRequest } from './_adminAuth.js';
 
@@ -10,12 +9,14 @@ export default async function handler(req, res) {
   }
 
   const { id } = req.query;
+  const supabase = getSupabase();
 
   if (req.method === 'GET') {
     try {
-      const allCategories = await db.select().from(categories);
+      const { data, error } = await supabase.from('categories').select('*');
+      if (error) throw error;
       res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
-      return res.status(200).json(allCategories || []);
+      return res.status(200).json(toCamelRows(data) || []);
     } catch (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -34,20 +35,21 @@ export default async function handler(req, res) {
       if (!catId) catId = `cat-${Date.now()}`;
 
       // Check if category ID already exists
-      const existing = await db.select().from(categories).where(eq(categories.id, catId));
-      if (existing.length > 0) {
+      const { data: existing } = await supabase.from('categories').select('id').eq('id', catId);
+      if (existing && existing.length > 0) {
         catId = `${catId}-${Date.now().toString().slice(-4)}`;
       }
 
-      const saved = await db.insert(categories).values({
+      const { data, error } = await supabase.from('categories').insert({
         id: catId,
         name,
         image: body.image || '',
         color: body.color || '#F1F8E9',
-        itemCount: 0
-      }).returning();
+        item_count: 0
+      }).select();
+      if (error) throw error;
 
-      return res.status(201).json(saved[0]);
+      return res.status(201).json(toCamelRow(data[0]));
     } catch (err) {
       console.error('Error creating category:', err);
       return res.status(500).json({ error: `Failed to create category: ${err.message}` });
@@ -62,16 +64,19 @@ export default async function handler(req, res) {
 
     try {
       const catId = String(id).trim();
-      const targetCat = await db.select().from(categories).where(eq(categories.id, catId));
-      const catName = targetCat[0]?.name;
+      const { data: targetCat } = await supabase.from('categories').select('name').eq('id', catId).maybeSingle();
+      const catName = targetCat?.name;
 
-      await db.delete(products).where(
-        catName
-          ? or(eq(products.category, catId), eq(products.category, catName))
-          : eq(products.category, catId)
-      ).catch(() => {});
+      try {
+        if (catName) {
+          await supabase.from('products').delete().or(`category.eq.${catId},category.eq.${catName}`);
+        } else {
+          await supabase.from('products').delete().eq('category', catId);
+        }
+      } catch { /* best-effort, same as before */ }
 
-      await db.delete(categories).where(eq(categories.id, catId));
+      const { error } = await supabase.from('categories').delete().eq('id', catId);
+      if (error) throw error;
       return res.status(200).json({ success: true, id: catId });
     } catch (err) {
       console.error('Error deleting category:', err);

@@ -1,28 +1,14 @@
-import { put } from '@vercel/blob';
 import { setCorsHeaders } from './_cors.js';
 import { isAdminRequest } from './_adminAuth.js';
 
-// More headroom than the platform default (10s) — a slow mobile upload plus
-// the Blob write can otherwise get killed mid-flight: the image finishes
-// uploading to Blob storage, but the function is cut before it can respond,
-// so the browser sees a network error ("Failed to fetch") for an upload that
-// actually succeeded.
-export const config = { maxDuration: 60 };
-
 const MAX_BYTES = 8 * 1024 * 1024; // 8MB
 
-// Vercel's Node.js functions only auto-parse req.body for JSON/text/
-// urlencoded content types — for anything else (image/*, application/
-// octet-stream, etc.) req.body is left unset and the raw request stream
-// has to be read directly, or every upload here would see 0 bytes.
-async function readRawBody(req) {
-  const chunks = [];
-  for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
-}
-
+// Supabase Storage upload (same Supabase project already used for the
+// database — free tier, no credit card required, unlike Cloudflare R2).
+// Runs through the same Node-compat adapter as every other handler here
+// (see functions/api/upload.js) — the adapter detects non-JSON/non-form
+// bodies (like this route's image upload) and hands them over as
+// `req.rawBody` (ArrayBuffer) instead of trying to JSON-parse them.
 export default async function handler(req, res) {
   setCorsHeaders(req, res);
 
@@ -44,23 +30,44 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'filename query param is required' });
   }
 
-  const buffer = Buffer.isBuffer(req.body) && req.body.length > 0
-    ? req.body
-    : await readRawBody(req);
-  if (!buffer.length) {
+  const buffer = req.rawBody;
+  if (!buffer || !buffer.byteLength) {
     return res.status(400).json({ error: 'Empty file' });
   }
-  if (buffer.length > MAX_BYTES) {
+  if (buffer.byteLength > MAX_BYTES) {
     return res.status(413).json({ error: 'Image is too large (max 8MB).' });
   }
 
+  const supabaseUrl = (process.env.SUPABASE_URL || '').replace(/\/+$/, '');
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const bucket = process.env.SUPABASE_STORAGE_BUCKET || 'uploads';
+  if (!supabaseUrl || !serviceKey) {
+    console.error('Error in /api/upload: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not configured');
+    return res.status(500).json({ error: 'Something went wrong. Please try again shortly.' });
+  }
+
+  const contentType = req.headers['content-type'] || 'application/octet-stream';
+  const ext = filename.includes('.') ? filename.slice(filename.lastIndexOf('.')) : '';
+  const key = `${crypto.randomUUID()}${ext}`;
+
   try {
-    const blob = await put(filename, buffer, {
-      access: 'public',
-      addRandomSuffix: true,
-      contentType: req.headers['content-type'] || 'application/octet-stream',
+    const uploadRes = await fetch(`${supabaseUrl}/storage/v1/object/${bucket}/${key}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${serviceKey}`,
+        apikey: serviceKey,
+        'Content-Type': contentType,
+      },
+      body: buffer,
     });
-    return res.status(200).json({ url: blob.url });
+
+    if (!uploadRes.ok) {
+      const errBody = await uploadRes.text().catch(() => '');
+      console.error(`Error in /api/upload: Supabase Storage returned ${uploadRes.status}:`, errBody);
+      return res.status(500).json({ error: 'Something went wrong. Please try again shortly.' });
+    }
+
+    return res.status(200).json({ url: `${supabaseUrl}/storage/v1/object/public/${bucket}/${key}` });
   } catch (error) {
     console.error('Error in /api/upload:', error);
     return res.status(500).json({ error: 'Something went wrong. Please try again shortly.' });

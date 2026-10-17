@@ -1,5 +1,5 @@
 import { db, orders, orderItems, users, inventory, inventoryLogs, products, coupons, settings } from '../db/index.js';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { Ratelimit } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
 import { setCorsHeaders } from './_cors.js';
@@ -7,39 +7,32 @@ import { clerk, getAuthenticatedUserId } from './_clerkAuth.js';
 import { sendOrderNotificationEmail, sendCustomerOrderConfirmationEmail } from './_email.js';
 import { sendOrderNotificationSMS } from './_sms.js';
 
-let ordersMigrated = false;
-async function autoMigrateOrdersSchema() {
-  if (ordersMigrated) return;
-  try {
-    await db.execute(sql`
-      ALTER TABLE orders
-      ADD COLUMN IF NOT EXISTS subtotal INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS delivery_fee INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS handling_charge INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS coupon_code TEXT,
-      ADD COLUMN IF NOT EXISTS discount INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS gst_amount INTEGER DEFAULT 0;
-    `);
-    await db.execute(sql`
-      ALTER TABLE order_items
-      ADD COLUMN IF NOT EXISTS gst_rate INTEGER DEFAULT 0;
-    `);
-    ordersMigrated = true;
-  } catch (err) {
-    console.warn("Auto-migration orders schema failed:", err.message);
+// The one-time schema migrations that used to run here (adding columns to
+// `orders`/`order_items`) have long since applied in production —
+// re-checking them via ALTER TABLE on every cold Workers isolate burns 2
+// real Hyperdrive queries for no benefit. This endpoint is also hit by the
+// admin panel's 10-second order-polling loop, making it the single biggest
+// contributor to exhausting the daily Hyperdrive quota. Removed.
+
+// Setup Upstash Redis rate limiting: 10 requests per 30 seconds for orders
+// endpoint. Built lazily (on first use within a request), not at module
+// load — on Workers, env vars/secrets only exist once a request is being
+// handled, so reading process.env at module scope (as this used to) could
+// capture an empty URL/token permanently for the isolate's lifetime.
+let _ratelimit = null;
+function getRatelimit() {
+  if (!_ratelimit) {
+    const redis = new Redis({
+      url: process.env.UPSTASH_REDIS_REST_URL || '',
+      token: process.env.UPSTASH_REDIS_REST_TOKEN || '',
+    });
+    _ratelimit = new Ratelimit({
+      redis,
+      limiter: Ratelimit.slidingWindow(10, '30 s'),
+    });
   }
+  return _ratelimit;
 }
-
-// Setup Upstash Redis rate limiting: 10 requests per 30 seconds for orders endpoint
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL || '',
-  token: process.env.UPSTASH_REDIS_REST_TOKEN || '',
-});
-
-const ratelimit = new Ratelimit({
-  redis,
-  limiter: Ratelimit.slidingWindow(10, '30 s'),
-});
 
 export default async function handler(req, res) {
   setCorsHeaders(req, res);
@@ -48,7 +41,6 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  await autoMigrateOrdersSchema();
 
   const { id } = req.query;
 
@@ -96,7 +88,7 @@ export default async function handler(req, res) {
   // 2. Rate limiting check (using userId as the rate limit key)
   try {
     if (process.env.UPSTASH_REDIS_REST_URL) {
-      const { success } = await ratelimit.limit(`orders_${userId}`);
+      const { success } = await getRatelimit().limit(`orders_${userId}`);
       if (!success) {
         return res.status(429).json({ error: 'Too many requests. Please try again later.' });
       }

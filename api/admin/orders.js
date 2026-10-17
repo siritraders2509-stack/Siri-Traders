@@ -2,9 +2,8 @@ import { db, orders, orderItems, users, inventory, inventoryLogs } from '../../d
 import { eq, desc } from 'drizzle-orm';
 import { setCorsHeaders } from '../_cors.js';
 import { isAdminRequest } from '../_adminAuth.js';
-import { sendCustomerOrderStatusUpdateEmail } from '../_email.js';
+import { sendCustomerOrderStatusUpdateEmail, sendViaResend } from '../_email.js';
 import { sendCustomerOrderStatusSMS, sendBulkPromotionalSMS } from '../_sms.js';
-import nodemailer from 'nodemailer';
 
 const VALID_STATUSES = ['Preparing', 'In Transit', 'Delivered', 'Paid', 'Cancelled'];
 const VALID_PAYMENT_STATUSES = ['Paid', 'Unpaid', 'Failed'];
@@ -165,22 +164,9 @@ export default async function handler(req, res) {
         return res.status(200).json({ success: true, count: 0, message: 'No recipients available.' });
       }
 
-      const smtpHost = process.env.SMTP_HOST;
-      const smtpPort = parseInt(process.env.SMTP_PORT || '587', 10);
-      const smtpUser = process.env.SMTP_USER;
-      const smtpPass = process.env.SMTP_PASS;
-      const smtpSender = process.env.SMTP_SENDER || `"Siri Traders" <${smtpUser}>`;
-
-      if (!smtpHost || !smtpUser || !smtpPass) {
-        return res.status(500).json({ error: 'Mail server credentials are not configured on Vercel' });
+      if (!process.env.RESEND_API_KEY) {
+        return res.status(500).json({ error: 'RESEND_API_KEY is not configured' });
       }
-
-      const transporter = nodemailer.createTransport({
-        host: smtpHost,
-        port: smtpPort,
-        secure: smtpPort === 465,
-        auth: { user: smtpUser, pass: smtpPass }
-      });
 
       const htmlContent = `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e5e7eb; border-radius: 12px; background-color: #faf9f6;">
@@ -201,21 +187,12 @@ export default async function handler(req, res) {
         </div>
       `;
 
-      if (recipients.length === 1) {
-        await transporter.sendMail({
-          from: smtpSender,
-          to: recipients[0],
-          subject: subject,
-          html: htmlContent
-        });
-      } else {
-        await transporter.sendMail({
-          from: smtpSender,
-          to: smtpSender,
-          bcc: recipients,
-          subject: subject,
-          html: htmlContent
-        });
+      const sent = recipients.length === 1
+        ? await sendViaResend({ to: recipients[0], subject, html: htmlContent })
+        : await sendViaResend({ to: process.env.RESEND_FROM || recipients[0], bcc: recipients, subject, html: htmlContent });
+
+      if (!sent) {
+        return res.status(500).json({ error: 'Failed to send broadcast email. Check RESEND_API_KEY.' });
       }
 
       return res.status(200).json({ success: true, count: recipients.length });

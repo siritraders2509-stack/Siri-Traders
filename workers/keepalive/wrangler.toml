@@ -1,0 +1,11 @@
+name = "siri-traders-supabase-keepalive"
+main = "index.js"
+compatibility_date = "2026-09-20"
+
+# Runs once a day — comfortably under Supabase's 7-day inactivity pause
+# threshold, with margin if a run or two ever fails.
+[triggers]
+crons = ["0 3 * * *"]
+
+# Set via: wrangler secret put SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY
+# (run from this directory) — same values as the Pages project's secrets.

@@ -1,6 +1,6 @@
 import * as dotenv from 'dotenv';
 import { pathToFileURL } from 'url';
-import { db, categories, products, offers, coupons, deliveryZones } from './index.js';
+import { db, configureDbForNode, categories, products, offers, coupons, deliveryZones } from './index.js';
 
 // Load Dummy Data
 import { categories as dummyCategories } from '../frontend/src/data/categories.js';
@@ -110,8 +110,11 @@ export async function seedDatabase() {
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
-  seedDatabase().then(() => process.exit(0)).catch(err => {
-    console.error('Seeding failed:', err);
-    process.exit(1);
-  });
+  configureDbForNode()
+    .then(() => seedDatabase())
+    .then(() => process.exit(0))
+    .catch(err => {
+      console.error('Seeding failed:', err);
+      process.exit(1);
+    });
 }

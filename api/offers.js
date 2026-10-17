@@ -1,5 +1,5 @@
 import { db, offers, coupons } from '../db/index.js';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { setCorsHeaders } from './_cors.js';
 import { isAdminRequest } from './_adminAuth.js';
 
@@ -12,56 +12,11 @@ const safeInt = (val, fallback = 0) => {
   return Math.max(0, Math.min(MAX_PG_INT, num));
 };
 
-async function autoMigrateOffersSchema() {
-  try {
-    await db.execute(sql`
-      ALTER TABLE offers
-      ADD COLUMN IF NOT EXISTS subtitle TEXT,
-      ADD COLUMN IF NOT EXISTS badge TEXT,
-      ADD COLUMN IF NOT EXISTS image TEXT,
-      ADD COLUMN IF NOT EXISTS link TEXT,
-      ADD COLUMN IF NOT EXISTS group_type TEXT DEFAULT 'daily',
-      ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'Sale offer',
-      ADD COLUMN IF NOT EXISTS buy_qty INTEGER DEFAULT 1,
-      ADD COLUMN IF NOT EXISTS get_qty INTEGER DEFAULT 1,
-      ADD COLUMN IF NOT EXISTS target_category TEXT,
-      ADD COLUMN IF NOT EXISTS target_product_id INTEGER,
-      ADD COLUMN IF NOT EXISTS items_included TEXT,
-      ADD COLUMN IF NOT EXISTS combo_items TEXT,
-      ADD COLUMN IF NOT EXISTS start_date TEXT,
-
-      ADD COLUMN IF NOT EXISTS end_date TEXT,
-      ADD COLUMN IF NOT EXISTS usage_limit INTEGER,
-      ADD COLUMN IF NOT EXISTS times_claimed INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true;
-    `);
-  } catch (err) {
-    console.warn("Auto-migration offers schema failed:", err.message);
-  }
-}
-
-async function autoMigrateCouponsSchema() {
-  try {
-    await db.execute(sql`
-      ALTER TABLE coupons
-      ADD COLUMN IF NOT EXISTS buy_quantity INTEGER DEFAULT 1,
-      ADD COLUMN IF NOT EXISTS get_quantity INTEGER DEFAULT 1,
-      ADD COLUMN IF NOT EXISTS target_type VARCHAR(32) DEFAULT 'all',
-      ADD COLUMN IF NOT EXISTS target_category VARCHAR(128),
-      ADD COLUMN IF NOT EXISTS target_product_id INTEGER,
-      ADD COLUMN IF NOT EXISTS target_customer_email VARCHAR(255),
-      ADD COLUMN IF NOT EXISTS usage_limit INTEGER,
-      ADD COLUMN IF NOT EXISTS per_user_limit INTEGER DEFAULT 1,
-      ADD COLUMN IF NOT EXISTS times_used INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS total_discount_given INTEGER DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS start_date VARCHAR(32),
-      ADD COLUMN IF NOT EXISTS end_date VARCHAR(32),
-      ADD COLUMN IF NOT EXISTS customer_type VARCHAR(32) DEFAULT 'retail';
-    `);
-  } catch (err) {
-    console.warn("Auto-migration coupons schema failed:", err.message);
-  }
-}
+// The one-time schema migrations that used to run here (adding columns to
+// `offers`/`coupons`) have long since applied in production, and — unlike
+// the equivalent guards elsewhere — these ran on every single call with no
+// in-memory flag at all. Removed entirely; this was a meaningful chunk of
+// what exhausted the daily Hyperdrive quota.
 
 export default async function handler(req, res) {
   setCorsHeaders(req, res);
@@ -126,7 +81,6 @@ export default async function handler(req, res) {
               return res.status(400).json({ error: `Coupon code "${code}" already exists. Please choose a unique coupon code or edit the existing coupon.` });
             }
             console.warn("Retrying coupon insert after schema migration...", insertErr.message);
-            await autoMigrateCouponsSchema();
             try {
               saved = await db.insert(coupons).values(values).onConflictDoUpdate({
                 target: coupons.code,
@@ -176,7 +130,6 @@ export default async function handler(req, res) {
             updated = await db.update(coupons).set(patch).where(eq(coupons.id, id)).returning();
           } catch (updateErr) {
             console.warn("Retrying coupon update after schema migration...", updateErr.message);
-            await autoMigrateCouponsSchema();
             updated = await db.update(coupons).set(patch).where(eq(coupons.id, id)).returning();
           }
 
@@ -257,7 +210,6 @@ export default async function handler(req, res) {
           }).returning();
         } catch (insertErr) {
           console.warn("Retrying offers insert after auto-migration...", insertErr.message);
-          await autoMigrateOffersSchema();
           saved = await db.insert(offers).values(values).onConflictDoUpdate({
             target: offers.id,
             set: values
@@ -316,7 +268,6 @@ export default async function handler(req, res) {
         updated = await db.update(offers).set(patch).where(eq(offers.id, id)).returning();
       } catch (updateErr) {
         console.warn("Retrying offers update after auto-migration...", updateErr.message);
-        await autoMigrateOffersSchema();
         updated = await db.update(offers).set(patch).where(eq(offers.id, id)).returning();
       }
 

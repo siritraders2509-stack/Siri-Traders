@@ -355,45 +355,22 @@ export default async function handler(req, res) {
       }
     }
 
-let settingsMigrated = false;
-async function ensureSettingsSchema() {
-  if (settingsMigrated) return;
-  try {
-    await db.execute(sql`
-      ALTER TABLE settings
-      ADD COLUMN IF NOT EXISTS home_sections JSONB DEFAULT '{"todaysDeals":true,"bestsellers":true,"dailyOffers":true,"festiveOffers":true,"shopByCategory":true,"categories":{}}'::jsonb,
-      ADD COLUMN IF NOT EXISTS header_menu JSONB,
-      ADD COLUMN IF NOT EXISTS footer_menu JSONB,
-      ADD COLUMN IF NOT EXISTS min_order_value INTEGER DEFAULT 0;
-    `);
-    settingsMigrated = true;
-  } catch (err) {
-    console.warn("Auto-migration settings schema failed:", err.message);
-  }
-}
+    // The one-time schema migration that used to run here (adding columns
+    // to `settings`) has long since applied in production — this endpoint
+    // is hit on effectively every page load (site-wide config, announcement
+    // banner) plus every admin settings save, so re-checking it via ALTER
+    // TABLE on every cold Workers isolate was a major contributor to
+    // exhausting the daily Hyperdrive quota. Removed.
 
     // ── Global Settings & SEO: /api/settings ──────────────────────────
     if (req.method === 'GET') {
-      try {
-        await ensureSettingsSchema();
-        const rows = await db.select().from(settings).where(eq(settings.id, 'default'));
-        return res.status(200).json(rows[0] || DEFAULTS);
-      } catch (getErr) {
-        if (String(getErr).includes('home_sections') || getErr?.code === '42703') {
-          settingsMigrated = false;
-          await ensureSettingsSchema();
-          const rows = await db.select().from(settings).where(eq(settings.id, 'default'));
-          return res.status(200).json(rows[0] || DEFAULTS);
-        }
-        throw getErr;
-      }
+      const rows = await db.select().from(settings).where(eq(settings.id, 'default'));
+      return res.status(200).json(rows[0] || DEFAULTS);
     }
 
     if (req.method === 'PUT') {
       const adminOk = await isAdminRequest(req);
       if (!adminOk) return res.status(403).json({ error: 'Forbidden: admin access required' });
-
-      await ensureSettingsSchema();
 
       const existingRows = await db.select().from(settings).where(eq(settings.id, 'default'));
       const existing = existingRows[0] || DEFAULTS;
@@ -430,8 +407,6 @@ async function ensureSettingsSchema() {
         return res.status(200).json(saved[0]);
       } catch (saveErr) {
         console.warn('First save attempt in /api/settings failed, ensuring column exists:', saveErr?.message || saveErr);
-        settingsMigrated = false;
-        await ensureSettingsSchema();
         const saved = await db.insert(settings).values(values).onConflictDoUpdate({
           target: settings.id,
           set: values

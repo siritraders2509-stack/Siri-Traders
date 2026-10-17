@@ -58,3 +58,7 @@ backend/.env.*
 .vercel
 .env*
 .env*.local
+
+# Cloudflare
+.wrangler
+.dev.vars
