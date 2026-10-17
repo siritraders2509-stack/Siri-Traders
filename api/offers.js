@@ -1,5 +1,4 @@
-import { db, offers, coupons } from '../db/index.js';
-import { eq } from 'drizzle-orm';
+import { getSupabase, toCamelRow, toCamelRows, throwIfError } from '../db/supabase.js';
 import { setCorsHeaders } from './_cors.js';
 import { isAdminRequest } from './_adminAuth.js';
 
@@ -12,12 +11,6 @@ const safeInt = (val, fallback = 0) => {
   return Math.max(0, Math.min(MAX_PG_INT, num));
 };
 
-// The one-time schema migrations that used to run here (adding columns to
-// `offers`/`coupons`) have long since applied in production, and — unlike
-// the equivalent guards elsewhere — these ran on every single call with no
-// in-memory flag at all. Removed entirely; this was a meaningful chunk of
-// what exhausted the daily Hyperdrive quota.
-
 export default async function handler(req, res) {
   setCorsHeaders(req, res);
 
@@ -26,14 +19,16 @@ export default async function handler(req, res) {
   }
 
   const { id, resource, action } = req.query;
+  const supabase = getSupabase();
 
   try {
     // ── Coupons Handler ───────────────────────────────────────────────
     if (resource === 'coupons' || action === 'coupons') {
       if (!id) {
         if (req.method === 'GET') {
-          const allCoupons = await db.select().from(coupons);
-          return res.status(200).json(allCoupons);
+          const { data, error } = await supabase.from('coupons').select('*');
+          throwIfError(error);
+          return res.status(200).json(toCamelRows(data));
         }
 
         if (req.method === 'POST') {
@@ -46,55 +41,39 @@ export default async function handler(req, res) {
 
           const couponId = body.id || `coupon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           const values = {
-            id: couponId,
+            id: String(couponId),
             code,
             type: body.type || 'flat',
             value: safeInt(body.value, 0),
-            minOrder: safeInt(body.minOrder, 0),
-            maxDiscount: body.maxDiscount ? safeInt(body.maxDiscount, null) : null,
-            buyQuantity: safeInt(body.buyQuantity, 1),
-            getQuantity: safeInt(body.getQuantity, 1),
-            targetType: body.targetType || 'all',
-            targetCategory: body.targetCategory || null,
-            targetProductId: body.targetProductId ? safeInt(body.targetProductId, null) : null,
-            targetCustomerEmail: body.targetCustomerEmail || null,
-            usageLimit: body.usageLimit ? safeInt(body.usageLimit, null) : null,
-            perUserLimit: safeInt(body.perUserLimit, 1),
-            timesUsed: safeInt(body.timesUsed, 0),
-            totalDiscountGiven: safeInt(body.totalDiscountGiven, 0),
-            startDate: body.startDate || null,
-            endDate: body.endDate || null,
+            min_order: safeInt(body.minOrder, 0),
+            max_discount: body.maxDiscount ? safeInt(body.maxDiscount, null) : null,
+            buy_quantity: safeInt(body.buyQuantity, 1),
+            get_quantity: safeInt(body.getQuantity, 1),
+            target_type: body.targetType || 'all',
+            target_category: body.targetCategory || null,
+            target_product_id: body.targetProductId ? safeInt(body.targetProductId, null) : null,
+            target_customer_email: body.targetCustomerEmail || null,
+            usage_limit: body.usageLimit ? safeInt(body.usageLimit, null) : null,
+            per_user_limit: safeInt(body.perUserLimit, 1),
+            times_used: safeInt(body.timesUsed, 0),
+            total_discount_given: safeInt(body.totalDiscountGiven, 0),
+            start_date: body.startDate || null,
+            end_date: body.endDate || null,
             title: body.title || '',
             description: body.description || '',
-            customerType: body.customerType || 'retail',
-            active: body.active !== false
+            customer_type: body.customerType || 'retail',
+            active: body.active !== false,
           };
 
-          let saved;
-          try {
-            saved = await db.insert(coupons).values(values).onConflictDoUpdate({
-              target: coupons.code,
-              set: values
-            }).returning();
-          } catch (insertErr) {
-            if (insertErr.message?.includes('coupons_code_unique') || insertErr.code === '23505') {
+          const { data, error } = await supabase.from('coupons').upsert(values, { onConflict: 'code' }).select();
+          if (error) {
+            if (error.message?.includes('coupons_code_unique') || error.code === '23505') {
               return res.status(400).json({ error: `Coupon code "${code}" already exists. Please choose a unique coupon code or edit the existing coupon.` });
             }
-            console.warn("Retrying coupon insert after schema migration...", insertErr.message);
-            try {
-              saved = await db.insert(coupons).values(values).onConflictDoUpdate({
-                target: coupons.code,
-                set: values
-              }).returning();
-            } catch (err2) {
-              if (err2.message?.includes('coupons_code_unique') || err2.code === '23505') {
-                return res.status(400).json({ error: `Coupon code "${code}" already exists. Please choose a unique coupon code or edit the existing coupon.` });
-              }
-              throw err2;
-            }
+            throwIfError(error);
           }
 
-          return res.status(201).json(saved[0]);
+          return res.status(201).json(toCamelRow(data[0]));
         }
       } else {
         if (req.method === 'PUT') {
@@ -106,41 +85,37 @@ export default async function handler(req, res) {
           if (body.code !== undefined) patch.code = String(body.code).trim().toUpperCase();
           if (body.type !== undefined) patch.type = body.type;
           if (body.value !== undefined) patch.value = safeInt(body.value, 0);
-          if (body.minOrder !== undefined) patch.minOrder = safeInt(body.minOrder, 0);
-          if (body.maxDiscount !== undefined) patch.maxDiscount = body.maxDiscount ? safeInt(body.maxDiscount, null) : null;
-          if (body.buyQuantity !== undefined) patch.buyQuantity = safeInt(body.buyQuantity, 1);
-          if (body.getQuantity !== undefined) patch.getQuantity = safeInt(body.getQuantity, 1);
-          if (body.targetType !== undefined) patch.targetType = body.targetType;
-          if (body.targetCategory !== undefined) patch.targetCategory = body.targetCategory;
-          if (body.targetProductId !== undefined) patch.targetProductId = body.targetProductId ? safeInt(body.targetProductId, null) : null;
-          if (body.targetCustomerEmail !== undefined) patch.targetCustomerEmail = body.targetCustomerEmail;
-          if (body.usageLimit !== undefined) patch.usageLimit = body.usageLimit ? safeInt(body.usageLimit, null) : null;
-          if (body.perUserLimit !== undefined) patch.perUserLimit = safeInt(body.perUserLimit, 1);
-          if (body.timesUsed !== undefined) patch.timesUsed = safeInt(body.timesUsed, 0);
-          if (body.totalDiscountGiven !== undefined) patch.totalDiscountGiven = safeInt(body.totalDiscountGiven, 0);
-          if (body.startDate !== undefined) patch.startDate = body.startDate;
-          if (body.endDate !== undefined) patch.endDate = body.endDate;
+          if (body.minOrder !== undefined) patch.min_order = safeInt(body.minOrder, 0);
+          if (body.maxDiscount !== undefined) patch.max_discount = body.maxDiscount ? safeInt(body.maxDiscount, null) : null;
+          if (body.buyQuantity !== undefined) patch.buy_quantity = safeInt(body.buyQuantity, 1);
+          if (body.getQuantity !== undefined) patch.get_quantity = safeInt(body.getQuantity, 1);
+          if (body.targetType !== undefined) patch.target_type = body.targetType;
+          if (body.targetCategory !== undefined) patch.target_category = body.targetCategory;
+          if (body.targetProductId !== undefined) patch.target_product_id = body.targetProductId ? safeInt(body.targetProductId, null) : null;
+          if (body.targetCustomerEmail !== undefined) patch.target_customer_email = body.targetCustomerEmail;
+          if (body.usageLimit !== undefined) patch.usage_limit = body.usageLimit ? safeInt(body.usageLimit, null) : null;
+          if (body.perUserLimit !== undefined) patch.per_user_limit = safeInt(body.perUserLimit, 1);
+          if (body.timesUsed !== undefined) patch.times_used = safeInt(body.timesUsed, 0);
+          if (body.totalDiscountGiven !== undefined) patch.total_discount_given = safeInt(body.totalDiscountGiven, 0);
+          if (body.startDate !== undefined) patch.start_date = body.startDate;
+          if (body.endDate !== undefined) patch.end_date = body.endDate;
           if (body.title !== undefined) patch.title = body.title;
           if (body.description !== undefined) patch.description = body.description;
-          if (body.customerType !== undefined) patch.customerType = body.customerType;
+          if (body.customerType !== undefined) patch.customer_type = body.customerType;
           if (body.active !== undefined) patch.active = Boolean(body.active);
 
-          let updated;
-          try {
-            updated = await db.update(coupons).set(patch).where(eq(coupons.id, id)).returning();
-          } catch (updateErr) {
-            console.warn("Retrying coupon update after schema migration...", updateErr.message);
-            updated = await db.update(coupons).set(patch).where(eq(coupons.id, id)).returning();
-          }
+          const { data, error } = await supabase.from('coupons').update(patch).eq('id', id).select();
+          throwIfError(error);
 
-          return res.status(200).json(updated[0]);
+          return res.status(200).json(toCamelRow(data[0]));
         }
 
         if (req.method === 'DELETE') {
           const adminOk = await isAdminRequest(req);
           if (!adminOk) return res.status(403).json({ error: 'Forbidden: admin access required' });
 
-          await db.delete(coupons).where(eq(coupons.id, id));
+          const { error } = await supabase.from('coupons').delete().eq('id', id);
+          throwIfError(error);
           return res.status(200).json({ success: true, id });
         }
       }
@@ -150,13 +125,14 @@ export default async function handler(req, res) {
     // ── Offers Handler: /api/offers ───────────────────────────────────
     if (!id) {
       if (req.method === 'GET') {
-        const allOffers = await db.select().from(offers);
-        const parsed = (allOffers || []).map(o => {
+        const { data, error } = await supabase.from('offers').select('*');
+        throwIfError(error);
+        const parsed = (data || []).map(o => {
           let comboItems = [];
-          if (o.comboItems) {
-            try { comboItems = typeof o.comboItems === 'string' ? JSON.parse(o.comboItems) : o.comboItems; } catch { comboItems = []; }
+          if (o.combo_items) {
+            try { comboItems = typeof o.combo_items === 'string' ? JSON.parse(o.combo_items) : o.combo_items; } catch { comboItems = []; }
           }
-          return { ...o, comboItems: Array.isArray(comboItems) ? comboItems : [] };
+          return { ...toCamelRow(o), comboItems: Array.isArray(comboItems) ? comboItems : [] };
         });
         return res.status(200).json(parsed);
       }
@@ -179,7 +155,7 @@ export default async function handler(req, res) {
           : (typeof rawCombo === 'string' ? rawCombo : '[]');
 
         const values = {
-          id: offerId,
+          id: String(offerId),
           title,
           subtitle: body.subtitle || '',
           price: safeInt(body.price, 0),
@@ -187,36 +163,25 @@ export default async function handler(req, res) {
           badge: body.badge || '',
           image: body.image || '',
           link: body.link || '/categories',
-          groupType: body.group || body.groupType || 'daily',
+          group_type: body.group || body.groupType || 'daily',
           type: body.type || 'Sale offer',
-          buyQty: safeInt(body.buyQty, 1),
-          getQty: safeInt(body.getQty, 1),
-          targetCategory: body.targetCategory || null,
-          targetProductId: body.targetProductId ? safeInt(body.targetProductId, null) : null,
-          itemsIncluded: body.itemsIncluded || body.items_included || '',
-          comboItems: comboItemsStr,
-          startDate: body.startDate || null,
-          endDate: body.endDate || null,
-          usageLimit: body.usageLimit ? safeInt(body.usageLimit, null) : null,
-          timesClaimed: safeInt(body.timesClaimed, 0),
-          active: body.active !== false
+          buy_qty: safeInt(body.buyQty, 1),
+          get_qty: safeInt(body.getQty, 1),
+          target_category: body.targetCategory || null,
+          target_product_id: body.targetProductId ? safeInt(body.targetProductId, null) : null,
+          items_included: body.itemsIncluded || body.items_included || '',
+          combo_items: comboItemsStr,
+          start_date: body.startDate || null,
+          end_date: body.endDate || null,
+          usage_limit: body.usageLimit ? safeInt(body.usageLimit, null) : null,
+          times_claimed: safeInt(body.timesClaimed, 0),
+          active: body.active !== false,
         };
 
-        let saved;
-        try {
-          saved = await db.insert(offers).values(values).onConflictDoUpdate({
-            target: offers.id,
-            set: values
-          }).returning();
-        } catch (insertErr) {
-          console.warn("Retrying offers insert after auto-migration...", insertErr.message);
-          saved = await db.insert(offers).values(values).onConflictDoUpdate({
-            target: offers.id,
-            set: values
-          }).returning();
-        }
+        const { data, error } = await supabase.from('offers').upsert(values, { onConflict: 'id' }).select();
+        throwIfError(error);
 
-        const resObj = saved[0] ? { ...saved[0] } : { ...values };
+        const resObj = data[0] ? toCamelRow(data[0]) : toCamelRow(values);
         try { resObj.comboItems = JSON.parse(resObj.comboItems || '[]'); } catch { resObj.comboItems = []; }
         return res.status(201).json(resObj);
       }
@@ -243,42 +208,38 @@ export default async function handler(req, res) {
         patch.image = body.image;
       }
       if (body.link !== undefined) patch.link = body.link;
-      if (body.group !== undefined) patch.groupType = body.group;
-      if (body.groupType !== undefined) patch.groupType = body.groupType;
+      if (body.group !== undefined) patch.group_type = body.group;
+      if (body.groupType !== undefined) patch.group_type = body.groupType;
       if (body.type !== undefined) patch.type = body.type;
-      if (body.buyQty !== undefined) patch.buyQty = safeInt(body.buyQty, 1);
-      if (body.getQty !== undefined) patch.getQty = safeInt(body.getQty, 1);
-      if (body.targetCategory !== undefined) patch.targetCategory = body.targetCategory;
-      if (body.targetProductId !== undefined) patch.targetProductId = body.targetProductId ? safeInt(body.targetProductId, null) : null;
-      if (body.itemsIncluded !== undefined) patch.itemsIncluded = body.itemsIncluded;
+      if (body.buyQty !== undefined) patch.buy_qty = safeInt(body.buyQty, 1);
+      if (body.getQty !== undefined) patch.get_qty = safeInt(body.getQty, 1);
+      if (body.targetCategory !== undefined) patch.target_category = body.targetCategory;
+      if (body.targetProductId !== undefined) patch.target_product_id = body.targetProductId ? safeInt(body.targetProductId, null) : null;
+      if (body.itemsIncluded !== undefined) patch.items_included = body.itemsIncluded;
       if (body.comboItems !== undefined || body.combo_items !== undefined) {
         const rawCombo = body.comboItems || body.combo_items;
-        patch.comboItems = Array.isArray(rawCombo) || typeof rawCombo === 'object'
+        patch.combo_items = Array.isArray(rawCombo) || typeof rawCombo === 'object'
           ? JSON.stringify(rawCombo)
           : String(rawCombo || '[]');
       }
-      if (body.startDate !== undefined) patch.startDate = body.startDate;
-      if (body.endDate !== undefined) patch.endDate = body.endDate;
-      if (body.usageLimit !== undefined) patch.usageLimit = body.usageLimit ? safeInt(body.usageLimit, null) : null;
-      if (body.timesClaimed !== undefined) patch.timesClaimed = safeInt(body.timesClaimed, 0);
+      if (body.startDate !== undefined) patch.start_date = body.startDate;
+      if (body.endDate !== undefined) patch.end_date = body.endDate;
+      if (body.usageLimit !== undefined) patch.usage_limit = body.usageLimit ? safeInt(body.usageLimit, null) : null;
+      if (body.timesClaimed !== undefined) patch.times_claimed = safeInt(body.timesClaimed, 0);
       if (body.active !== undefined) patch.active = Boolean(body.active);
 
-      let updated;
-      try {
-        updated = await db.update(offers).set(patch).where(eq(offers.id, id)).returning();
-      } catch (updateErr) {
-        console.warn("Retrying offers update after auto-migration...", updateErr.message);
-        updated = await db.update(offers).set(patch).where(eq(offers.id, id)).returning();
-      }
+      const { data, error } = await supabase.from('offers').update(patch).eq('id', id).select();
+      throwIfError(error);
 
-      return res.status(200).json(updated[0]);
+      return res.status(200).json(toCamelRow(data[0]));
     }
 
     if (req.method === 'DELETE') {
       const adminOk = await isAdminRequest(req);
       if (!adminOk) return res.status(403).json({ error: 'Forbidden: admin access required' });
 
-      await db.delete(offers).where(eq(offers.id, id));
+      const { error } = await supabase.from('offers').delete().eq('id', id);
+      throwIfError(error);
       return res.status(200).json({ success: true, id });
     }
 

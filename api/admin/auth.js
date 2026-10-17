@@ -1,7 +1,6 @@
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
-import { eq, desc, and, inArray } from 'drizzle-orm';
-import { db, adminUsers, reviews, orders, orderItems } from '../../db/index.js';
+import { getSupabase, toCamelRow, toCamelRows, throwIfError } from '../../db/supabase.js';
 import { setCorsHeaders } from '../_cors.js';
 import { isAdminRequest } from '../_adminAuth.js';
 import { getAuthenticatedUserId, clerk } from '../_clerkAuth.js';
@@ -26,7 +25,7 @@ const updateAdminSchema = z.object({
   message: 'Provide at least a role or a password to update'
 });
 
-async function handleLogin(req, res) {
+async function handleLogin(req, res, supabase) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
@@ -37,13 +36,13 @@ async function handleLogin(req, res) {
     return res.status(400).json({ error: 'Email and password are required' });
   }
 
-  const rows = await db.select().from(adminUsers).where(eq(adminUsers.email, email));
-  const admin = rows[0];
+  const { data: admin, error } = await supabase.from('admin_users').select('*').eq('email', email).maybeSingle();
+  throwIfError(error);
   if (!admin) {
     return res.status(401).json({ error: 'Invalid admin email or password' });
   }
 
-  const passwordMatches = await bcrypt.compare(password, admin.passwordHash);
+  const passwordMatches = await bcrypt.compare(password, admin.password_hash);
   if (!passwordMatches) {
     return res.status(401).json({ error: 'Invalid admin email or password' });
   }
@@ -76,7 +75,7 @@ const changePasswordSchema = z.object({
 // x-admin-secret header, since this must be the account's own owner) and
 // proof of the current password, unlike the Owner-only admin-users PATCH
 // which resets someone else's password without knowing the old one.
-async function handleChangePassword(req, res) {
+async function handleChangePassword(req, res, supabase) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const session = getSessionFromRequest(req);
@@ -89,29 +88,31 @@ async function handleChangePassword(req, res) {
   }
   const { currentPassword, newPassword } = validation.data;
 
-  const rows = await db.select().from(adminUsers).where(eq(adminUsers.id, session.sub));
-  const admin = rows[0];
+  const { data: admin, error } = await supabase.from('admin_users').select('*').eq('id', session.sub).maybeSingle();
+  throwIfError(error);
   if (!admin) return res.status(404).json({ error: 'Admin account not found' });
 
-  const passwordMatches = await bcrypt.compare(currentPassword, admin.passwordHash);
+  const passwordMatches = await bcrypt.compare(currentPassword, admin.password_hash);
   if (!passwordMatches) {
     return res.status(401).json({ error: 'Current password is incorrect' });
   }
 
   const passwordHash = await bcrypt.hash(newPassword, 10);
-  await db.update(adminUsers).set({ passwordHash }).where(eq(adminUsers.id, session.sub));
+  const { error: updErr } = await supabase.from('admin_users').update({ password_hash: passwordHash }).eq('id', session.sub);
+  throwIfError(updErr);
 
-  const emailSent = await sendAdminPasswordChangedEmail(admin, newPassword);
+  const emailSent = await sendAdminPasswordChangedEmail(toCamelRow(admin), newPassword);
   return res.status(200).json({ success: true, emailSent });
 }
 
-async function handleAdminUsers(req, res) {
+async function handleAdminUsers(req, res, supabase) {
   const adminOk = await isAdminRequest(req);
   if (!adminOk) return res.status(403).json({ error: 'Forbidden: admin access required' });
 
   if (req.method === 'GET') {
-    const rows = await db.select().from(adminUsers);
-    const safe = rows.map(({ passwordHash, ...rest }) => rest);
+    const { data, error } = await supabase.from('admin_users').select('*');
+    throwIfError(error);
+    const safe = toCamelRows(data).map(({ passwordHash, ...rest }) => rest);
     return res.status(200).json(safe);
   }
 
@@ -124,7 +125,8 @@ async function handleAdminUsers(req, res) {
       return res.status(400).json({ error: 'You cannot remove your own admin account' });
     }
 
-    await db.delete(adminUsers).where(eq(adminUsers.id, id));
+    const { error } = await supabase.from('admin_users').delete().eq('id', id);
+    throwIfError(error);
     return res.status(200).json({ success: true, id });
   }
 
@@ -141,17 +143,18 @@ async function handleAdminUsers(req, res) {
     const { role, password } = validation.data;
     const updateData = {};
     if (role !== undefined) updateData.role = role;
-    if (password !== undefined) updateData.passwordHash = await bcrypt.hash(password, 10);
+    if (password !== undefined) updateData.password_hash = await bcrypt.hash(password, 10);
 
-    const updated = await db.update(adminUsers).set(updateData).where(eq(adminUsers.id, id)).returning();
+    const { data: updated, error } = await supabase.from('admin_users').update(updateData).eq('id', id).select();
+    throwIfError(error);
     if (!updated.length) return res.status(404).json({ error: 'Admin user not found' });
 
     let emailSent = null;
     if (password !== undefined) {
-      emailSent = await sendAdminPasswordChangedEmail(updated[0], password);
+      emailSent = await sendAdminPasswordChangedEmail(toCamelRow(updated[0]), password);
     }
 
-    const { passwordHash: _omit, ...safe } = updated[0];
+    const { passwordHash: _omit, ...safe } = toCamelRow(updated[0]);
     return res.status(200).json({ ...safe, emailSent });
   }
 
@@ -168,27 +171,29 @@ async function handleAdminUsers(req, res) {
     const passwordHash = await bcrypt.hash(password, 10);
     const id = `admin-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-    const inserted = await db.insert(adminUsers).values({
+    const { data: inserted, error } = await supabase.from('admin_users').insert({
       id,
       name,
       email: normalizedEmail,
-      passwordHash,
-      role: finalRole
-    }).returning();
+      password_hash: passwordHash,
+      role: finalRole,
+    }).select();
+    throwIfError(error);
 
-    const emailSent = await sendAdminWelcomeEmail(inserted[0], password);
+    const emailSent = await sendAdminWelcomeEmail(toCamelRow(inserted[0]), password);
 
-    const { passwordHash: _omit, ...safe } = inserted[0];
+    const { passwordHash: _omit, ...safe } = toCamelRow(inserted[0]);
     return res.status(201).json({ ...safe, emailSent });
   }
 
   return res.status(405).json({ error: 'Method not allowed' });
 }
 
-async function handleReviews(req, res) {
+async function handleReviews(req, res, supabase) {
   if (req.method === 'GET') {
-    const allReviews = await db.select().from(reviews).orderBy(desc(reviews.createdAt));
-    return res.status(200).json(allReviews);
+    const { data, error } = await supabase.from('reviews').select('*').order('created_at', { ascending: false });
+    throwIfError(error);
+    return res.status(200).json(toCamelRows(data));
   }
 
   if (req.method === 'POST') {
@@ -211,24 +216,23 @@ async function handleReviews(req, res) {
     // Only reviewable if this user actually has a delivered order containing this item.
     // A specific purchased line item (orderItemId) is preferred so each order
     // can be reviewed separately; productId alone falls back to the first match.
-    const deliveredOrders = await db.select().from(orders)
-      .where(and(eq(orders.userId, userId), eq(orders.status, 'Delivered')));
-    const purchasedItem = deliveredOrders.length
-      ? (await db.select().from(orderItems)
-          .where(and(
-            inArray(orderItems.orderId, deliveredOrders.map(o => o.id)),
-            orderItemId ? eq(orderItems.id, orderItemId) : eq(orderItems.productId, productId)
-          )))[0]
-      : null;
+    const { data: deliveredOrders } = await supabase.from('orders').select('id').eq('user_id', userId).eq('status', 'Delivered');
+    let purchasedItem = null;
+    if (deliveredOrders?.length) {
+      const orderIds = deliveredOrders.map(o => o.id);
+      let itemQuery = supabase.from('order_items').select('*').in('order_id', orderIds);
+      itemQuery = orderItemId ? itemQuery.eq('id', orderItemId) : itemQuery.eq('product_id', productId);
+      const { data: items } = await itemQuery;
+      purchasedItem = items?.[0] || null;
+    }
     if (!purchasedItem) {
       return res.status(403).json({ error: 'You can only review items from your delivered orders.' });
     }
 
     // One review per purchased line item, so re-ordering the same product
     // later lets the customer review that new order too.
-    const alreadyReviewed = await db.select().from(reviews)
-      .where(and(eq(reviews.userId, userId), eq(reviews.orderItemId, purchasedItem.id)));
-    if (alreadyReviewed.length) {
+    const { data: alreadyReviewed } = await supabase.from('reviews').select('id').eq('user_id', userId).eq('order_item_id', purchasedItem.id);
+    if (alreadyReviewed?.length) {
       return res.status(409).json({ error: 'You have already reviewed this item from this order.' });
     }
 
@@ -240,25 +244,26 @@ async function handleReviews(req, res) {
         || 'Customer';
     } catch { /* keep default name */ }
 
-    const inserted = await db.insert(reviews).values({
-      productId: productId || purchasedItem.productId || null,
-      orderItemId: purchasedItem.id,
-      productName: purchasedItem.name || (productId ? `Product #${productId}` : 'Item'),
-      userId,
-      userName,
+    const { data: inserted, error } = await supabase.from('reviews').insert({
+      product_id: productId || purchasedItem.product_id || null,
+      order_item_id: purchasedItem.id,
+      product_name: purchasedItem.name || (productId ? `Product #${productId}` : 'Item'),
+      user_id: userId,
+      user_name: userName,
       rating,
       title: body?.title || '',
       comment: body?.comment || '',
-      status: 'Approved'
-    }).returning();
+      status: 'Approved',
+    }).select();
+    throwIfError(error);
 
-    return res.status(201).json(inserted[0]);
+    return res.status(201).json(toCamelRow(inserted[0]));
   }
 
   return res.status(405).json({ error: 'Method not allowed' });
 }
 
-async function handleReviewUpdate(req, res) {
+async function handleReviewUpdate(req, res, supabase) {
   const adminOk = await isAdminRequest(req);
   if (!adminOk) return res.status(403).json({ error: 'Forbidden: admin access required' });
 
@@ -267,15 +272,17 @@ async function handleReviewUpdate(req, res) {
 
   if (req.method === 'PATCH' || req.method === 'PUT') {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-    const updated = await db.update(reviews).set({
-      status: body.status || 'Approved'
-    }).where(eq(reviews.id, Number(id))).returning();
+    const { data, error } = await supabase.from('reviews').update({
+      status: body.status || 'Approved',
+    }).eq('id', Number(id)).select();
+    throwIfError(error);
 
-    return res.status(200).json(updated[0]);
+    return res.status(200).json(toCamelRow(data[0]));
   }
 
   if (req.method === 'DELETE') {
-    await db.delete(reviews).where(eq(reviews.id, Number(id)));
+    const { error } = await supabase.from('reviews').delete().eq('id', Number(id));
+    throwIfError(error);
     return res.status(200).json({ success: true, id });
   }
 
@@ -290,15 +297,16 @@ export default async function handler(req, res) {
   }
 
   const { action } = req.query;
+  const supabase = getSupabase();
 
   try {
-    if (action === 'login') return await handleLogin(req, res);
+    if (action === 'login') return await handleLogin(req, res, supabase);
     if (action === 'logout') return await handleLogout(req, res);
-    if (action === 'change-password') return await handleChangePassword(req, res);
+    if (action === 'change-password') return await handleChangePassword(req, res, supabase);
     if (action === 'me') return await handleMe(req, res);
-    if (action === 'admin-users') return await handleAdminUsers(req, res);
-    if (action === 'reviews') return await handleReviews(req, res);
-    if (action === 'review-status' || action === 'update-review') return await handleReviewUpdate(req, res);
+    if (action === 'admin-users') return await handleAdminUsers(req, res, supabase);
+    if (action === 'reviews') return await handleReviews(req, res, supabase);
+    if (action === 'review-status' || action === 'update-review') return await handleReviewUpdate(req, res, supabase);
     return res.status(404).json({ error: 'Not found' });
   } catch (error) {
     if (error?.code === '23505') {

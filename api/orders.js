@@ -1,18 +1,10 @@
-import { db, orders, orderItems, users, inventory, inventoryLogs, products, coupons, settings } from '../db/index.js';
-import { eq, inArray } from 'drizzle-orm';
+import { getSupabase, toSnakeRow, toCamelRow, toCamelRows, throwIfError } from '../db/supabase.js';
 import { Ratelimit } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
 import { setCorsHeaders } from './_cors.js';
 import { clerk, getAuthenticatedUserId } from './_clerkAuth.js';
 import { sendOrderNotificationEmail, sendCustomerOrderConfirmationEmail } from './_email.js';
 import { sendOrderNotificationSMS } from './_sms.js';
-
-// The one-time schema migrations that used to run here (adding columns to
-// `orders`/`order_items`) have long since applied in production —
-// re-checking them via ALTER TABLE on every cold Workers isolate burns 2
-// real Hyperdrive queries for no benefit. This endpoint is also hit by the
-// admin panel's 10-second order-polling loop, making it the single biggest
-// contributor to exhausting the daily Hyperdrive quota. Removed.
 
 // Setup Upstash Redis rate limiting: 10 requests per 30 seconds for orders
 // endpoint. Built lazily (on first use within a request), not at module
@@ -41,8 +33,8 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-
   const { id } = req.query;
+  const supabase = getSupabase();
 
   // 1. Auth check
   const userId = await getAuthenticatedUserId(req);
@@ -66,18 +58,19 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Invalid order ID' });
       }
 
-      const orderResult = await db.select().from(orders).where(eq(orders.id, parsedId));
-      if (!orderResult.length) {
+      const { data: order, error: orderErr } = await supabase.from('orders').select('*').eq('id', parsedId).maybeSingle();
+      throwIfError(orderErr);
+      if (!order) {
         return res.status(404).json({ error: 'Order not found' });
       }
 
-      const order = orderResult[0];
-      if (order.userId !== userId) {
+      if (order.user_id !== userId) {
         return res.status(403).json({ error: 'Forbidden: You do not own this order' });
       }
 
-      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, order.id));
-      return res.status(200).json({ ...order, items });
+      const { data: items, error: itemsErr } = await supabase.from('order_items').select('*').eq('order_id', order.id);
+      throwIfError(itemsErr);
+      return res.status(200).json({ ...toCamelRow(order), items: toCamelRows(items) });
     } catch (error) {
       console.error("Error in /api/orders?id:", error);
       return res.status(500).json({ error: 'Something went wrong. Please try again shortly.' });
@@ -100,16 +93,19 @@ export default async function handler(req, res) {
 
   try {
     if (req.method === 'GET') {
-      const userOrders = await db.select().from(orders).where(eq(orders.userId, userId));
-      if (userOrders.length === 0) {
+      const { data: userOrders, error: ordersErr } = await supabase.from('orders').select('*').eq('user_id', userId);
+      throwIfError(ordersErr);
+      if (!userOrders.length) {
         return res.status(200).json([]);
       }
       const orderIds = userOrders.map(o => o.id);
-      const allItems = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
+      const { data: allItems, error: itemsErr } = await supabase.from('order_items').select('*').in('order_id', orderIds);
+      throwIfError(itemsErr);
 
-      const ordersWithItems = userOrders.map(order => ({
+      const camelItems = toCamelRows(allItems);
+      const ordersWithItems = toCamelRows(userOrders).map(order => ({
         ...order,
-        items: allItems.filter(item => item.orderId === order.id)
+        items: camelItems.filter(item => item.orderId === order.id)
       }));
 
       // Sort orders descending so the latest ones show up first
@@ -124,8 +120,9 @@ export default async function handler(req, res) {
 
       // Admin can close the store (settings.homeSections.storeOpen === false)
       // or enforce a minimum order value requirement.
-      const [siteRow] = await db.select({ homeSections: settings.homeSections, minOrderValue: settings.minOrderValue }).from(settings).where(eq(settings.id, 'default'));
-      if (siteRow?.homeSections?.storeOpen === false) {
+      const { data: siteRow, error: siteErr } = await supabase.from('settings').select('home_sections, min_order_value').eq('id', 'default').maybeSingle();
+      throwIfError(siteErr);
+      if (siteRow?.home_sections?.storeOpen === false) {
         return res.status(403).json({ error: 'The store is closed right now. Please try again when we reopen.', storeClosed: true });
       }
 
@@ -133,7 +130,7 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Missing order details' });
       }
 
-      const minOrderVal = Number(siteRow?.minOrderValue) || 0;
+      const minOrderVal = Number(siteRow?.min_order_value) || 0;
       const subtotalVal = Number(body.subtotal) || Number(total) || 0;
       const hasCoupon = Boolean(body.couponCode || Number(body.discount) > 0);
       if (minOrderVal > 0 && !hasCoupon && subtotalVal < minOrderVal) {
@@ -154,131 +151,127 @@ export default async function handler(req, res) {
 
         if (email) {
           // Only upsert if we have an email (it's a unique NOT NULL column)
-          await db.insert(users)
-            .values({
-              id: userId,
-              email: email,
-              name: name || 'Customer',
-              phone: phone,
-            })
-            .onConflictDoUpdate({
-              target: users.id,
-              set: { name: name || 'Customer', phone, updatedAt: new Date() }
-            });
+          await supabase.from('users').upsert({
+            id: userId,
+            email,
+            name: name || 'Customer',
+            phone,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'id' });
         }
       } catch (err) {
         console.warn("Failed to sync user data, proceeding with order anyway:", err.message);
       }
 
       const isCod = (paymentMethod || '').toLowerCase().includes('cod');
-      const tempId = Date.now();
       const txnId = isCod ? `COD-SIRI-${Math.floor(100000 + Math.random() * 900000)}` : `TXN-SIRI-${Math.floor(200000 + Math.random() * 900000)}`;
       const trackingNumber = `TRK-SIRI-${Math.floor(500000 + Math.random() * 900000)}`;
 
       const computedSubtotal = items.reduce((sum, i) => sum + (Number(i.price) || 0) * (Number(i.qty || i.quantity) || 1), 0);
 
-      // Create order & its items in one transaction — if any item fails
-      // (e.g. an unresolvable product id), the whole order rolls back instead
-      // of leaving an orphaned order with no items sitting in the dashboard.
-      const insertedOrder = await db.transaction(async (tx) => {
-        const orderResult = await tx.insert(orders).values({
-          userId,
-          total,
-          subtotal: body.subtotal !== undefined ? Number(body.subtotal) : (computedSubtotal || total),
-          deliveryFee: body.deliveryFee !== undefined ? Number(body.deliveryFee) : 0,
-          // No handling charge or GST is charged — only the product amount and delivery fee.
-          couponCode: body.couponCode || null,
-          discount: body.discount !== undefined ? Number(body.discount) : 0,
-          deliveryAddress: deliveryAddress || '',
-          paymentMethod: paymentMethod || 'COD',
-          status: isCod ? 'Preparing' : 'Paid',
-          customerName: customerName || body.customerName || 'Customer',
-          customerPhone: body.customerPhone || '',
-          customerEmail: customerEmail || body.customerEmail || '',
-          // 'Pending' isn't a valid payment status any more (only Paid/Unpaid/Failed) —
-          // a fresh COD order simply hasn't been paid yet.
-          paymentStatus: isCod ? 'Unpaid' : 'Paid',
-          paymentGateway: isCod ? 'Cash on Delivery' : (body.paymentGateway || 'UPI / Online'),
-          paymentTxnId: txnId,
-          trackingNumber: trackingNumber,
-          deliverySlot: body.deliverySlot || 'Morning (7:00 AM - 10:00 AM)',
-          deliveryDate: body.deliveryDate || new Date().toLocaleDateString('en-IN')
-        }).returning();
+      // PostgREST has no multi-statement transactions, so this runs as a
+      // sequence of calls instead of a DB transaction. If something fails
+      // partway through, the order row (and whatever items/inventory
+      // changes already landed) stays — no automatic rollback. Same
+      // trade-off already accepted elsewhere in this migration (see
+      // products.js's DELETE handler).
+      const { data: orderRows, error: orderInsertErr } = await supabase.from('orders').insert({
+        user_id: userId,
+        total,
+        subtotal: body.subtotal !== undefined ? Number(body.subtotal) : (computedSubtotal || total),
+        delivery_fee: body.deliveryFee !== undefined ? Number(body.deliveryFee) : 0,
+        // No handling charge or GST is charged — only the product amount and delivery fee.
+        coupon_code: body.couponCode || null,
+        discount: body.discount !== undefined ? Number(body.discount) : 0,
+        delivery_address: deliveryAddress || '',
+        payment_method: paymentMethod || 'COD',
+        status: isCod ? 'Preparing' : 'Paid',
+        customer_name: customerName || body.customerName || 'Customer',
+        customer_phone: body.customerPhone || '',
+        customer_email: customerEmail || body.customerEmail || '',
+        // 'Pending' isn't a valid payment status any more (only Paid/Unpaid/Failed) —
+        // a fresh COD order simply hasn't been paid yet.
+        payment_status: isCod ? 'Unpaid' : 'Paid',
+        payment_gateway: isCod ? 'Cash on Delivery' : (body.paymentGateway || 'UPI / Online'),
+        payment_txn_id: txnId,
+        tracking_number: trackingNumber,
+        delivery_slot: body.deliverySlot || 'Morning (7:00 AM - 10:00 AM)',
+        delivery_date: body.deliveryDate || new Date().toLocaleDateString('en-IN'),
+      }).select();
+      throwIfError(orderInsertErr);
+      const order = orderRows[0];
 
-        const order = orderResult[0];
-
-        if (body.couponCode) {
-          try {
-            const codeClean = String(body.couponCode).trim().toUpperCase();
-            const discVal = Math.max(0, Number(body.discount) || 0);
-            const foundCoupons = await tx.select().from(coupons).where(eq(coupons.code, codeClean));
-            if (foundCoupons.length) {
-              const cRow = foundCoupons[0];
-              await tx.update(coupons).set({
-                timesUsed: (cRow.timesUsed || 0) + 1,
-                totalDiscountGiven: (cRow.totalDiscountGiven || 0) + discVal
-              }).where(eq(coupons.id, cRow.id));
-            }
-          } catch (couponStatsErr) {
-            console.warn("Failed to increment coupon stats:", couponStatsErr.message);
+      if (body.couponCode) {
+        try {
+          const codeClean = String(body.couponCode).trim().toUpperCase();
+          const discVal = Math.max(0, Number(body.discount) || 0);
+          const { data: foundCoupons } = await supabase.from('coupons').select('*').eq('code', codeClean);
+          if (foundCoupons?.length) {
+            const cRow = foundCoupons[0];
+            await supabase.from('coupons').update({
+              times_used: (cRow.times_used || 0) + 1,
+              total_discount_given: (cRow.total_discount_given || 0) + discVal,
+            }).eq('id', cRow.id);
           }
+        } catch (couponStatsErr) {
+          console.warn("Failed to increment coupon stats:", couponStatsErr.message);
+        }
+      }
+
+      for (const item of items) {
+        // Promotional/combo offer items (added from Today's Deals / Festive
+        // Offers) have no backing product row — their id looks like
+        // "offer-<id>" rather than a real numeric product id. Store null
+        // for those instead of forcing a bogus number through.
+        let cleanProductId = parseInt(item.productId, 10);
+        if (isNaN(cleanProductId)) {
+          cleanProductId = parseInt(item.id, 10);
+        }
+        if (isNaN(cleanProductId)) {
+          cleanProductId = null;
         }
 
-        for (const item of items) {
-          // Promotional/combo offer items (added from Today's Deals / Festive
-          // Offers) have no backing product row — their id looks like
-          // "offer-<id>" rather than a real numeric product id. Store null
-          // for those instead of forcing a bogus number through.
-          let cleanProductId = parseInt(item.productId, 10);
-          if (isNaN(cleanProductId)) {
-            cleanProductId = parseInt(item.id, 10);
-          }
-          if (isNaN(cleanProductId)) {
-            cleanProductId = null;
-          }
+        const quantity = item.qty || item.quantity || 1;
 
-          const quantity = item.qty || item.quantity || 1;
+        await supabase.from('order_items').insert({
+          order_id: order.id,
+          product_id: cleanProductId,
+          name: item.name,
+          quantity,
+          price: item.price,
+          weight: item.weight || '',
+          unit: item.unit || '',
+        });
 
-          await tx.insert(orderItems).values({
-            orderId: order.id,
-            productId: cleanProductId,
-            name: item.name,
-            quantity,
-            price: item.price,
-            weight: item.weight || '',
-            unit: item.unit || ''
-          });
-
-          // Deduct from tracked inventory (skip untracked/promotional items —
-          // no productId, or no inventory row exists for it yet).
-          if (cleanProductId != null) {
-            const invRows = await tx.select().from(inventory).where(eq(inventory.productId, cleanProductId));
-            if (invRows.length) {
-              const inv = invRows[0];
-              const stockBefore = inv.availableStock;
-              const stockAfter = Math.max(0, stockBefore - quantity);
-              await tx.update(inventory)
-                .set({ availableStock: stockAfter, updatedAt: new Date() })
-                .where(eq(inventory.productId, cleanProductId));
-              await tx.insert(inventoryLogs).values({
-                productId: cleanProductId,
-                productName: item.name,
-                changeType: 'SUBTRACT',
-                quantity,
-                stockBefore,
-                stockAfter,
-                reason: `Customer order #${order.id}`,
-                adminName: 'Customer Order'
-              });
-              if (stockAfter === 0) {
-                await tx.update(products).set({ inStock: false }).where(eq(products.id, cleanProductId));
-              }
+        // Deduct from tracked inventory (skip untracked/promotional items —
+        // no productId, or no inventory row exists for it yet).
+        if (cleanProductId != null) {
+          const { data: invRows } = await supabase.from('inventory').select('*').eq('product_id', cleanProductId);
+          if (invRows?.length) {
+            const inv = invRows[0];
+            const stockBefore = inv.available_stock;
+            const stockAfter = Math.max(0, stockBefore - quantity);
+            await supabase.from('inventory')
+              .update({ available_stock: stockAfter, updated_at: new Date().toISOString() })
+              .eq('product_id', cleanProductId);
+            await supabase.from('inventory_logs').insert({
+              product_id: cleanProductId,
+              product_name: item.name,
+              change_type: 'SUBTRACT',
+              quantity,
+              stock_before: stockBefore,
+              stock_after: stockAfter,
+              reason: `Customer order #${order.id}`,
+              admin_name: 'Customer Order',
+            });
+            if (stockAfter === 0) {
+              await supabase.from('products').update({ in_stock: false }).eq('id', cleanProductId);
             }
           }
         }
+      }
 
-        return order;
-      });
+      const insertedOrder = toCamelRow(order);
 
       // Fire email notification asynchronously (don't block HTTP response)
       sendOrderNotificationEmail(insertedOrder, items).catch(err => {

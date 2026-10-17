@@ -1,5 +1,4 @@
-import { db, settings, deliveryZones, cmsBanners, cmsPages, cmsFaqs, cmsBlogs, seoRedirects } from '../db/index.js';
-import { eq, asc, desc, sql } from 'drizzle-orm';
+import { getSupabase, toSnakeRow, toCamelRow, toCamelRows, throwIfError } from '../db/supabase.js';
 import { setCorsHeaders } from './_cors.js';
 import { isAdminRequest } from './_adminAuth.js';
 
@@ -39,14 +38,16 @@ export default async function handler(req, res) {
   }
 
   const { action, resource, id } = req.query;
+  const supabase = getSupabase();
 
   try {
     // ── Delivery Zones Sub-handler: /api/delivery_zones or ?resource=delivery_zones
     if (resource === 'delivery_zones' || action === 'delivery_zones') {
       if (!id) {
         if (req.method === 'GET') {
-          const allZones = await db.select().from(deliveryZones);
-          return res.status(200).json(allZones);
+          const { data, error } = await supabase.from('delivery_zones').select('*');
+          throwIfError(error);
+          return res.status(200).json(toCamelRows(data));
         }
 
         if (req.method === 'POST') {
@@ -60,7 +61,7 @@ export default async function handler(req, res) {
 
           const zoneId = body.id || `zone-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           const values = {
-            id: zoneId,
+            id: String(zoneId),
             area: body.area,
             pincode: String(body.pincode),
             time: body.time || '30 mins',
@@ -78,12 +79,10 @@ export default async function handler(req, res) {
             driverAssigned: body.driverAssigned || ''
           };
 
-          const saved = await db.insert(deliveryZones).values(values).onConflictDoUpdate({
-            target: deliveryZones.id,
-            set: values
-          }).returning();
+          const { data, error } = await supabase.from('delivery_zones').upsert(toSnakeRow(values), { onConflict: 'id' }).select();
+          throwIfError(error);
 
-          return res.status(201).json(saved[0]);
+          return res.status(201).json(toCamelRow(data[0]));
         }
       } else {
         if (req.method === 'PUT') {
@@ -103,15 +102,17 @@ export default async function handler(req, res) {
           if (body.deliverySlots !== undefined) patch.deliverySlots = body.deliverySlots;
           if (body.driverAssigned !== undefined) patch.driverAssigned = body.driverAssigned;
 
-          const updated = await db.update(deliveryZones).set(patch).where(eq(deliveryZones.id, id)).returning();
-          return res.status(200).json(updated[0]);
+          const { data, error } = await supabase.from('delivery_zones').update(toSnakeRow(patch)).eq('id', id).select();
+          throwIfError(error);
+          return res.status(200).json(toCamelRow(data[0]));
         }
 
         if (req.method === 'DELETE') {
           const adminOk = await isAdminRequest(req);
           if (!adminOk) return res.status(403).json({ error: 'Forbidden: admin access required' });
 
-          await db.delete(deliveryZones).where(eq(deliveryZones.id, id));
+          const { error } = await supabase.from('delivery_zones').delete().eq('id', id);
+          throwIfError(error);
           return res.status(200).json({ success: true, id });
         }
       }
@@ -121,29 +122,30 @@ export default async function handler(req, res) {
     // ── CMS Bulk Fetch: /api/settings?action=cms_all ─────────────────
     if (action === 'cms_all' && req.method === 'GET') {
       const [banners, pages, faqs, blogs, redirects, siteSettings] = await Promise.all([
-        db.select().from(cmsBanners).orderBy(asc(cmsBanners.sortOrder)),
-        db.select().from(cmsPages).orderBy(desc(cmsPages.updatedAt)),
-        db.select().from(cmsFaqs).orderBy(asc(cmsFaqs.sortOrder)),
-        db.select().from(cmsBlogs).orderBy(desc(cmsBlogs.createdAt)),
-        db.select().from(seoRedirects).orderBy(desc(seoRedirects.hits)),
-        db.select().from(settings).where(eq(settings.id, 'default'))
+        supabase.from('cms_banners').select('*').order('sort_order', { ascending: true }),
+        supabase.from('cms_pages').select('*').order('updated_at', { ascending: false }),
+        supabase.from('cms_faqs').select('*').order('sort_order', { ascending: true }),
+        supabase.from('cms_blogs').select('*').order('created_at', { ascending: false }),
+        supabase.from('seo_redirects').select('*').order('hits', { ascending: false }),
+        supabase.from('settings').select('*').eq('id', 'default').maybeSingle(),
       ]);
 
       return res.status(200).json({
-        banners,
-        pages,
-        faqs,
-        blogs,
-        redirects,
-        settings: siteSettings[0] || DEFAULTS
+        banners: toCamelRows(banners.data),
+        pages: toCamelRows(pages.data),
+        faqs: toCamelRows(faqs.data),
+        blogs: toCamelRows(blogs.data),
+        redirects: toCamelRows(redirects.data),
+        settings: siteSettings.data ? toCamelRow(siteSettings.data) : DEFAULTS,
       });
     }
 
     // ── Banners CRUD: /api/settings?action=banner ─────────────────────
     if (action === 'banner') {
       if (req.method === 'GET') {
-        const rows = await db.select().from(cmsBanners).orderBy(asc(cmsBanners.sortOrder));
-        return res.status(200).json(rows);
+        const { data, error } = await supabase.from('cms_banners').select('*').order('sort_order', { ascending: true });
+        throwIfError(error);
+        return res.status(200).json(toCamelRows(data));
       }
 
       const adminOk = await isAdminRequest(req);
@@ -151,37 +153,40 @@ export default async function handler(req, res) {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
 
       if (req.method === 'POST') {
-        const saved = await db.insert(cmsBanners).values({
+        const { data, error } = await supabase.from('cms_banners').insert({
           title: body.title,
           subtitle: body.subtitle || '',
           image: body.image,
-          mobileImage: body.mobileImage || null,
-          ctaText: body.ctaText || 'Shop Now',
-          ctaLink: body.ctaLink || '/categories',
+          mobile_image: body.mobileImage || null,
+          cta_text: body.ctaText || 'Shop Now',
+          cta_link: body.ctaLink || '/categories',
           type: body.type || 'hero',
-          sortOrder: Number(body.sortOrder) || 0,
-          active: body.active !== false
-        }).returning();
-        return res.status(201).json(saved[0]);
+          sort_order: Number(body.sortOrder) || 0,
+          active: body.active !== false,
+        }).select();
+        throwIfError(error);
+        return res.status(201).json(toCamelRow(data[0]));
       }
 
       if (req.method === 'PUT' && id) {
-        const updated = await db.update(cmsBanners).set({
+        const { data, error } = await supabase.from('cms_banners').update({
           title: body.title,
           subtitle: body.subtitle,
           image: body.image,
-          mobileImage: body.mobileImage,
-          ctaText: body.ctaText,
-          ctaLink: body.ctaLink,
+          mobile_image: body.mobileImage,
+          cta_text: body.ctaText,
+          cta_link: body.ctaLink,
           type: body.type,
-          sortOrder: Number(body.sortOrder) || 0,
-          active: body.active !== false
-        }).where(eq(cmsBanners.id, Number(id))).returning();
-        return res.status(200).json(updated[0]);
+          sort_order: Number(body.sortOrder) || 0,
+          active: body.active !== false,
+        }).eq('id', Number(id)).select();
+        throwIfError(error);
+        return res.status(200).json(toCamelRow(data[0]));
       }
 
       if (req.method === 'DELETE' && id) {
-        await db.delete(cmsBanners).where(eq(cmsBanners.id, Number(id)));
+        const { error } = await supabase.from('cms_banners').delete().eq('id', Number(id));
+        throwIfError(error);
         return res.status(200).json({ success: true, id });
       }
     }
@@ -189,8 +194,9 @@ export default async function handler(req, res) {
     // ── Pages CRUD: /api/settings?action=page ─────────────────────────
     if (action === 'page') {
       if (req.method === 'GET') {
-        const rows = await db.select().from(cmsPages).orderBy(desc(cmsPages.updatedAt));
-        return res.status(200).json(rows);
+        const { data, error } = await supabase.from('cms_pages').select('*').order('updated_at', { ascending: false });
+        throwIfError(error);
+        return res.status(200).json(toCamelRows(data));
       }
 
       const adminOk = await isAdminRequest(req);
@@ -198,34 +204,37 @@ export default async function handler(req, res) {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
 
       if (req.method === 'POST') {
-        const saved = await db.insert(cmsPages).values({
+        const { data, error } = await supabase.from('cms_pages').insert({
           slug: (body.slug || body.title.toLowerCase().replace(/[^a-z0-9]+/g, '-')).replace(/(^-|-$)/g, ''),
           title: body.title,
           content: body.content || '',
           category: body.category || 'general',
-          metaTitle: body.metaTitle || body.title,
-          metaDescription: body.metaDescription || '',
-          isPublished: body.isPublished !== false
-        }).returning();
-        return res.status(201).json(saved[0]);
+          meta_title: body.metaTitle || body.title,
+          meta_description: body.metaDescription || '',
+          is_published: body.isPublished !== false,
+        }).select();
+        throwIfError(error);
+        return res.status(201).json(toCamelRow(data[0]));
       }
 
       if (req.method === 'PUT' && id) {
-        const updated = await db.update(cmsPages).set({
+        const { data, error } = await supabase.from('cms_pages').update({
           slug: body.slug,
           title: body.title,
           content: body.content,
           category: body.category,
-          metaTitle: body.metaTitle,
-          metaDescription: body.metaDescription,
-          isPublished: body.isPublished !== false,
-          updatedAt: new Date()
-        }).where(eq(cmsPages.id, Number(id))).returning();
-        return res.status(200).json(updated[0]);
+          meta_title: body.metaTitle,
+          meta_description: body.metaDescription,
+          is_published: body.isPublished !== false,
+          updated_at: new Date().toISOString(),
+        }).eq('id', Number(id)).select();
+        throwIfError(error);
+        return res.status(200).json(toCamelRow(data[0]));
       }
 
       if (req.method === 'DELETE' && id) {
-        await db.delete(cmsPages).where(eq(cmsPages.id, Number(id)));
+        const { error } = await supabase.from('cms_pages').delete().eq('id', Number(id));
+        throwIfError(error);
         return res.status(200).json({ success: true, id });
       }
     }
@@ -233,8 +242,9 @@ export default async function handler(req, res) {
     // ── FAQs CRUD: /api/settings?action=faq ───────────────────────────
     if (action === 'faq') {
       if (req.method === 'GET') {
-        const rows = await db.select().from(cmsFaqs).orderBy(asc(cmsFaqs.sortOrder));
-        return res.status(200).json(rows);
+        const { data, error } = await supabase.from('cms_faqs').select('*').order('sort_order', { ascending: true });
+        throwIfError(error);
+        return res.status(200).json(toCamelRows(data));
       }
 
       const adminOk = await isAdminRequest(req);
@@ -242,29 +252,32 @@ export default async function handler(req, res) {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
 
       if (req.method === 'POST') {
-        const saved = await db.insert(cmsFaqs).values({
+        const { data, error } = await supabase.from('cms_faqs').insert({
           question: body.question,
           answer: body.answer,
           category: body.category || 'General',
-          sortOrder: Number(body.sortOrder) || 0,
-          active: body.active !== false
-        }).returning();
-        return res.status(201).json(saved[0]);
+          sort_order: Number(body.sortOrder) || 0,
+          active: body.active !== false,
+        }).select();
+        throwIfError(error);
+        return res.status(201).json(toCamelRow(data[0]));
       }
 
       if (req.method === 'PUT' && id) {
-        const updated = await db.update(cmsFaqs).set({
+        const { data, error } = await supabase.from('cms_faqs').update({
           question: body.question,
           answer: body.answer,
           category: body.category,
-          sortOrder: Number(body.sortOrder) || 0,
-          active: body.active !== false
-        }).where(eq(cmsFaqs.id, Number(id))).returning();
-        return res.status(200).json(updated[0]);
+          sort_order: Number(body.sortOrder) || 0,
+          active: body.active !== false,
+        }).eq('id', Number(id)).select();
+        throwIfError(error);
+        return res.status(200).json(toCamelRow(data[0]));
       }
 
       if (req.method === 'DELETE' && id) {
-        await db.delete(cmsFaqs).where(eq(cmsFaqs.id, Number(id)));
+        const { error } = await supabase.from('cms_faqs').delete().eq('id', Number(id));
+        throwIfError(error);
         return res.status(200).json({ success: true, id });
       }
     }
@@ -272,8 +285,9 @@ export default async function handler(req, res) {
     // ── Blog CRUD: /api/settings?action=blog ──────────────────────────
     if (action === 'blog') {
       if (req.method === 'GET') {
-        const rows = await db.select().from(cmsBlogs).orderBy(desc(cmsBlogs.createdAt));
-        return res.status(200).json(rows);
+        const { data, error } = await supabase.from('cms_blogs').select('*').order('created_at', { ascending: false });
+        throwIfError(error);
+        return res.status(200).json(toCamelRows(data));
       }
 
       const adminOk = await isAdminRequest(req);
@@ -281,37 +295,40 @@ export default async function handler(req, res) {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
 
       if (req.method === 'POST') {
-        const saved = await db.insert(cmsBlogs).values({
+        const { data, error } = await supabase.from('cms_blogs').insert({
           slug: (body.slug || body.title.toLowerCase().replace(/[^a-z0-9]+/g, '-')).replace(/(^-|-$)/g, ''),
           title: body.title,
           excerpt: body.excerpt || '',
           content: body.content || '',
           author: body.author || 'Siri Traders Team',
           category: body.category || 'Grocery Tips',
-          coverImage: body.coverImage || '',
+          cover_image: body.coverImage || '',
           tags: body.tags || '',
-          isPublished: body.isPublished !== false
-        }).returning();
-        return res.status(201).json(saved[0]);
+          is_published: body.isPublished !== false,
+        }).select();
+        throwIfError(error);
+        return res.status(201).json(toCamelRow(data[0]));
       }
 
       if (req.method === 'PUT' && id) {
-        const updated = await db.update(cmsBlogs).set({
+        const { data, error } = await supabase.from('cms_blogs').update({
           slug: body.slug,
           title: body.title,
           excerpt: body.excerpt,
           content: body.content,
           author: body.author,
           category: body.category,
-          coverImage: body.coverImage,
+          cover_image: body.coverImage,
           tags: body.tags,
-          isPublished: body.isPublished !== false
-        }).where(eq(cmsBlogs.id, Number(id))).returning();
-        return res.status(200).json(updated[0]);
+          is_published: body.isPublished !== false,
+        }).eq('id', Number(id)).select();
+        throwIfError(error);
+        return res.status(200).json(toCamelRow(data[0]));
       }
 
       if (req.method === 'DELETE' && id) {
-        await db.delete(cmsBlogs).where(eq(cmsBlogs.id, Number(id)));
+        const { error } = await supabase.from('cms_blogs').delete().eq('id', Number(id));
+        throwIfError(error);
         return res.status(200).json({ success: true, id });
       }
     }
@@ -319,8 +336,9 @@ export default async function handler(req, res) {
     // ── Redirects CRUD: /api/settings?action=redirect ─────────────────
     if (action === 'redirect') {
       if (req.method === 'GET') {
-        const rows = await db.select().from(seoRedirects).orderBy(desc(seoRedirects.hits));
-        return res.status(200).json(rows);
+        const { data, error } = await supabase.from('seo_redirects').select('*').order('hits', { ascending: false });
+        throwIfError(error);
+        return res.status(200).json(toCamelRows(data));
       }
 
       const adminOk = await isAdminRequest(req);
@@ -328,52 +346,50 @@ export default async function handler(req, res) {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
 
       if (req.method === 'POST') {
-        const saved = await db.insert(seoRedirects).values({
-          sourcePath: body.sourcePath,
-          targetPath: body.targetPath,
-          statusCode: Number(body.statusCode) || 301,
+        const { data, error } = await supabase.from('seo_redirects').insert({
+          source_path: body.sourcePath,
+          target_path: body.targetPath,
+          status_code: Number(body.statusCode) || 301,
           hits: Number(body.hits) || 0,
-          active: body.active !== false
-        }).returning();
-        return res.status(201).json(saved[0]);
+          active: body.active !== false,
+        }).select();
+        throwIfError(error);
+        return res.status(201).json(toCamelRow(data[0]));
       }
 
       if (req.method === 'PUT' && id) {
-        const updated = await db.update(seoRedirects).set({
-          sourcePath: body.sourcePath,
-          targetPath: body.targetPath,
-          statusCode: Number(body.statusCode) || 301,
+        const { data, error } = await supabase.from('seo_redirects').update({
+          source_path: body.sourcePath,
+          target_path: body.targetPath,
+          status_code: Number(body.statusCode) || 301,
           hits: Number(body.hits) || 0,
-          active: body.active !== false
-        }).where(eq(seoRedirects.id, Number(id))).returning();
-        return res.status(200).json(updated[0]);
+          active: body.active !== false,
+        }).eq('id', Number(id)).select();
+        throwIfError(error);
+        return res.status(200).json(toCamelRow(data[0]));
       }
 
       if (req.method === 'DELETE' && id) {
-        await db.delete(seoRedirects).where(eq(seoRedirects.id, Number(id)));
+        const { error } = await supabase.from('seo_redirects').delete().eq('id', Number(id));
+        throwIfError(error);
         return res.status(200).json({ success: true, id });
       }
     }
 
-    // The one-time schema migration that used to run here (adding columns
-    // to `settings`) has long since applied in production — this endpoint
-    // is hit on effectively every page load (site-wide config, announcement
-    // banner) plus every admin settings save, so re-checking it via ALTER
-    // TABLE on every cold Workers isolate was a major contributor to
-    // exhausting the daily Hyperdrive quota. Removed.
-
     // ── Global Settings & SEO: /api/settings ──────────────────────────
     if (req.method === 'GET') {
-      const rows = await db.select().from(settings).where(eq(settings.id, 'default'));
-      return res.status(200).json(rows[0] || DEFAULTS);
+      const { data, error } = await supabase.from('settings').select('*').eq('id', 'default').maybeSingle();
+      throwIfError(error);
+      return res.status(200).json(data ? toCamelRow(data) : DEFAULTS);
     }
 
     if (req.method === 'PUT') {
       const adminOk = await isAdminRequest(req);
       if (!adminOk) return res.status(403).json({ error: 'Forbidden: admin access required' });
 
-      const existingRows = await db.select().from(settings).where(eq(settings.id, 'default'));
-      const existing = existingRows[0] || DEFAULTS;
+      const { data: existingRow, error: existingErr } = await supabase.from('settings').select('*').eq('id', 'default').maybeSingle();
+      throwIfError(existingErr);
+      const existing = existingRow ? toCamelRow(existingRow) : DEFAULTS;
 
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
       const values = {
@@ -399,20 +415,9 @@ export default async function handler(req, res) {
         homeSections: body.homeSections !== undefined ? body.homeSections : existing.homeSections
       };
 
-      try {
-        const saved = await db.insert(settings).values(values).onConflictDoUpdate({
-          target: settings.id,
-          set: values
-        }).returning();
-        return res.status(200).json(saved[0]);
-      } catch (saveErr) {
-        console.warn('First save attempt in /api/settings failed, ensuring column exists:', saveErr?.message || saveErr);
-        const saved = await db.insert(settings).values(values).onConflictDoUpdate({
-          target: settings.id,
-          set: values
-        }).returning();
-        return res.status(200).json(saved[0]);
-      }
+      const { data, error } = await supabase.from('settings').upsert(toSnakeRow(values), { onConflict: 'id' }).select();
+      throwIfError(error);
+      return res.status(200).json(toCamelRow(data[0]));
     }
 
     return res.status(405).json({ error: 'Method not allowed' });

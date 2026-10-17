@@ -6,12 +6,9 @@ compatibility_date = "2026-09-20"
 compatibility_flags = ["nodejs_compat"]
 pages_build_output_dir = "frontend/dist"
 
-# Proxies the existing Supabase Postgres connection (db/index.js). Create via:
-#   wrangler hyperdrive create siri-traders-db --connection-string="<DATABASE_URL>"
-# then replace the id below with the one it prints.
-[[hyperdrive]]
-binding = "HYPERDRIVE"
-id = "4a38c3f4121f413db5c918957335a833"
+# DB access is over Supabase's REST API (db/supabase.js, plain fetch()) —
+# no Hyperdrive/Postgres binding needed; it has no query-count ceiling
+# unlike Hyperdrive's free-tier 100k/day cap.
 
 # Image uploads go to Supabase Storage (api/upload.js) over plain fetch() —
 # no Cloudflare binding needed, just the SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY

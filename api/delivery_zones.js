@@ -1,12 +1,6 @@
-import { db, deliveryZones } from '../db/index.js';
-import { eq } from 'drizzle-orm';
+import { getSupabase, toSnakeRow, toCamelRow, toCamelRows, throwIfError } from '../db/supabase.js';
 import { setCorsHeaders } from './_cors.js';
 import { isAdminRequest } from './_adminAuth.js';
-
-// The one-time `CREATE TABLE IF NOT EXISTS delivery_zones` that used to run
-// here has long since applied in production — re-checking it on every cold
-// Workers isolate burns a real Hyperdrive query for no benefit, which is
-// exactly what exhausted the daily Hyperdrive quota. Removed.
 
 const DEFAULT_14_ZONES = [
   { id: 'zone-1', area: 'Isnapur', pincode: '502307', time: '15-30 mins', distance: '0-3 km', active: true, deliveryFee: 0, freeDeliveryThreshold: 299, handlingCharge: 0, minOrderValue: 100 },
@@ -31,18 +25,22 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
+  const supabase = getSupabase();
+
   if (req.method === 'GET') {
     try {
-      let zones = await db.select().from(deliveryZones);
+      let { data: zones, error } = await supabase.from('delivery_zones').select('*');
+      throwIfError(error);
       if (!zones || zones.length === 0) {
         // Auto-seed 14 default delivery zones if table is empty
         for (const zone of DEFAULT_14_ZONES) {
-          await db.insert(deliveryZones).values(zone).onConflictDoNothing();
+          await supabase.from('delivery_zones').upsert(toSnakeRow(zone), { onConflict: 'id', ignoreDuplicates: true });
         }
-        zones = await db.select().from(deliveryZones);
+        const reseeded = await supabase.from('delivery_zones').select('*');
+        zones = reseeded.data;
       }
       res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
-      return res.status(200).json(zones || DEFAULT_14_ZONES);
+      return res.status(200).json(zones?.length ? toCamelRows(zones) : DEFAULT_14_ZONES);
     } catch (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -77,8 +75,9 @@ export default async function handler(req, res) {
         driverAssigned: body.driverAssigned ? String(body.driverAssigned).trim() : null,
       };
 
-      const [inserted] = await db.insert(deliveryZones).values(newZone).returning();
-      return res.status(201).json(inserted || newZone);
+      const { data, error } = await supabase.from('delivery_zones').insert(toSnakeRow(newZone)).select();
+      throwIfError(error);
+      return res.status(201).json(toCamelRow(data?.[0]) || newZone);
     } catch (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -106,8 +105,9 @@ export default async function handler(req, res) {
       if (body.deliverySlots !== undefined) updateData.deliverySlots = Array.isArray(body.deliverySlots) ? body.deliverySlots : [];
       if (body.driverAssigned !== undefined) updateData.driverAssigned = body.driverAssigned ? String(body.driverAssigned).trim() : null;
 
-      const [updated] = await db.update(deliveryZones).set(updateData).where(eq(deliveryZones.id, String(targetId))).returning();
-      return res.status(200).json(updated || { id: targetId, ...updateData });
+      const { data, error } = await supabase.from('delivery_zones').update(toSnakeRow(updateData)).eq('id', String(targetId)).select();
+      throwIfError(error);
+      return res.status(200).json(toCamelRow(data?.[0]) || { id: targetId, ...updateData });
     } catch (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -120,7 +120,8 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Delivery zone ID is required' });
       }
 
-      await db.delete(deliveryZones).where(eq(deliveryZones.id, String(targetId)));
+      const { error } = await supabase.from('delivery_zones').delete().eq('id', String(targetId));
+      throwIfError(error);
       return res.status(200).json({ success: true, id: targetId });
     } catch (err) {
       return res.status(500).json({ error: err.message });

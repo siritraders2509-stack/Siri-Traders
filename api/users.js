@@ -1,4 +1,4 @@
-import { db, users } from '../db/index.js';
+import { getSupabase, throwIfError } from '../db/supabase.js';
 import { setCorsHeaders } from './_cors.js';
 import { getAuthenticatedUserId, clerk } from './_clerkAuth.js';
 
@@ -25,12 +25,15 @@ export default async function handler(req, res) {
     const name = `${clerkUser.firstName || ''} ${clerkUser.lastName || ''}`.trim() || 'Customer';
     const phone = clerkUser.phoneNumbers[0]?.phoneNumber || '';
 
-    await db.insert(users)
-      .values({ id: userId, email, name, phone })
-      .onConflictDoUpdate({
-        target: users.id,
-        set: { name, phone, updatedAt: new Date() }
-      });
+    const supabase = getSupabase();
+    const { error } = await supabase.from('users').upsert({
+      id: userId,
+      email,
+      name,
+      phone,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'id' });
+    throwIfError(error);
 
     return res.status(200).json({ synced: true });
   } catch (error) {

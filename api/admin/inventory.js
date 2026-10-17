@@ -1,5 +1,4 @@
-import { db, products, inventory, inventoryLogs, orders, orderItems } from '../../db/index.js';
-import { eq, desc, inArray, and } from 'drizzle-orm';
+import { getSupabase, toSnakeRow, toCamelRow, toCamelRows, throwIfError } from '../../db/supabase.js';
 import { setCorsHeaders } from '../_cors.js';
 import { isAdminRequest } from '../_adminAuth.js';
 import { getSessionFromRequest } from '../_adminSession.js';
@@ -23,6 +22,7 @@ export default async function handler(req, res) {
   const currentAdminName = session?.name || session?.email || 'Admin';
 
   const action = req.query.action || 'list';
+  const supabase = getSupabase();
 
   try {
     // ──────────────────────────────────────────────────────────────────────────
@@ -34,19 +34,25 @@ export default async function handler(req, res) {
         const productId = req.query.productId ? parseInt(req.query.productId, 10) : null;
         const limit = Math.min(200, parseInt(req.query.limit, 10) || 100);
 
-        let query = db.select().from(inventoryLogs).orderBy(desc(inventoryLogs.createdAt)).limit(limit);
+        let query = supabase.from('inventory_logs').select('*').order('created_at', { ascending: false }).limit(limit);
         if (productId) {
-          query = db.select().from(inventoryLogs).where(eq(inventoryLogs.productId, productId)).orderBy(desc(inventoryLogs.createdAt)).limit(limit);
+          query = query.eq('product_id', productId);
         }
 
-        const logs = await query;
-        return res.status(200).json(logs);
+        const { data: logs, error } = await query;
+        throwIfError(error);
+        return res.status(200).json(toCamelRows(logs));
       }
 
       // 1B. Fetch full inventory overview & product stock tracking
       // Fetch all products
-      const allProducts = await db.select().from(products);
-      const allInventory = await db.select().from(inventory);
+      const { data: productsRaw, error: prodErr } = await supabase.from('products').select('*');
+      throwIfError(prodErr);
+      const { data: inventoryRaw, error: invErr } = await supabase.from('inventory').select('*');
+      throwIfError(invErr);
+
+      const allProducts = toCamelRows(productsRaw);
+      const allInventory = toCamelRows(inventoryRaw);
 
       // Map existing inventory by productId
       const invMap = new Map();
@@ -63,7 +69,7 @@ export default async function handler(req, res) {
         expDate.setMonth(expDate.getMonth() + 6);
         const expiryStr = expDate.toISOString().split('T')[0];
 
-        const newRows = await db.insert(inventory).values(missingInv.map(prod => ({
+        const { data: newRowsRaw, error: insErr } = await supabase.from('inventory').insert(missingInv.map(prod => toSnakeRow({
           productId: prod.id,
           availableStock: 0,
           reservedStock: 0,
@@ -76,21 +82,23 @@ export default async function handler(req, res) {
           expiryDate: expiryStr,
           batchNumber: `BAT-2026-${String(prod.id).padStart(3, '0')}`,
           location: 'Main Shelf'
-        }))).returning();
+        }))).select();
+        throwIfError(insErr);
 
-        newRows.forEach(inv => invMap.set(inv.productId, inv));
+        toCamelRows(newRowsRaw).forEach(inv => invMap.set(inv.productId, inv));
       }
 
       // Fetch active orders to calculate dynamically reserved items
-      const activeOrders = await db.select().from(orders).where(
-        inArray(orders.status, ['Preparing', 'In Transit'])
-      );
+      const { data: activeOrdersRaw, error: ordErr } = await supabase.from('orders').select('id').in('status', ['Preparing', 'In Transit']);
+      throwIfError(ordErr);
+      const activeOrders = activeOrdersRaw || [];
 
       const reservedCountMap = new Map();
       if (activeOrders.length > 0) {
         const orderIds = activeOrders.map(o => o.id);
-        const items = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
-        items.forEach(item => {
+        const { data: itemsRaw, error: itemsErr } = await supabase.from('order_items').select('*').in('order_id', orderIds);
+        throwIfError(itemsErr);
+        toCamelRows(itemsRaw).forEach(item => {
           const prev = reservedCountMap.get(item.productId) || 0;
           reservedCountMap.set(item.productId, prev + (item.quantity || 1));
         });
@@ -246,20 +254,23 @@ export default async function handler(req, res) {
       }
 
       // Find existing product and inventory
-      const [prod] = await db.select().from(products).where(eq(products.id, pId));
-      if (!prod) {
+      const { data: prodRaw } = await supabase.from('products').select('*').eq('id', pId).maybeSingle();
+      if (!prodRaw) {
         return res.status(404).json({ error: 'Product not found' });
       }
+      const prod = toCamelRow(prodRaw);
 
-      let [inv] = await db.select().from(inventory).where(eq(inventory.productId, pId));
+      let { data: invRaw } = await supabase.from('inventory').select('*').eq('product_id', pId).maybeSingle();
+      let inv = invRaw ? toCamelRow(invRaw) : null;
       if (!inv) {
-        const [createdInv] = await db.insert(inventory).values({
-          productId: pId,
-          availableStock: 0,
-          reorderLevel: 10,
-          costPrice: Math.round((prod.price || 50) * 0.75)
-        }).returning();
-        inv = createdInv;
+        const { data: createdInv, error: createErr } = await supabase.from('inventory').insert({
+          product_id: pId,
+          available_stock: 0,
+          reorder_level: 10,
+          cost_price: Math.round((prod.price || 50) * 0.75),
+        }).select();
+        throwIfError(createErr);
+        inv = toCamelRow(createdInv[0]);
       }
 
       const stockBefore = inv.availableStock;
@@ -329,7 +340,7 @@ export default async function handler(req, res) {
         returnedStock: newReturned,
         expiredStock: newExpired,
         incomingStock: newIncoming,
-        updatedAt: new Date()
+        updatedAt: new Date().toISOString(),
       };
 
       if (batchNumber !== undefined) updateData.batchNumber = batchNumber;
@@ -337,31 +348,34 @@ export default async function handler(req, res) {
       if (costPrice !== undefined) updateData.costPrice = parseInt(costPrice, 10) || 0;
       if (reorderLevel !== undefined) updateData.reorderLevel = parseInt(reorderLevel, 10) || 10;
 
-      const [updatedInv] = await db
-        .update(inventory)
-        .set(updateData)
-        .where(eq(inventory.productId, pId))
-        .returning();
+      const { data: updatedInvRaw, error: updErr } = await supabase.from('inventory')
+        .update(toSnakeRow(updateData))
+        .eq('product_id', pId)
+        .select();
+      throwIfError(updErr);
+      const updatedInv = toCamelRow(updatedInvRaw[0]);
 
       // Automatically sync product.inStock with availableStock
       const shouldBeInStock = newAvailable > 0;
       if (prod.inStock !== shouldBeInStock) {
-        await db.update(products).set({ inStock: shouldBeInStock }).where(eq(products.id, pId));
+        await supabase.from('products').update({ in_stock: shouldBeInStock }).eq('id', pId);
       }
 
       // Insert log entry
-      const [logEntry] = await db.insert(inventoryLogs).values({
-        productId: pId,
-        productName: prod.name,
-        changeType,
+      const { data: logEntryRaw, error: logErr } = await supabase.from('inventory_logs').insert({
+        product_id: pId,
+        product_name: prod.name,
+        change_type: changeType,
         quantity: qty,
-        stockBefore,
-        stockAfter: newAvailable,
+        stock_before: stockBefore,
+        stock_after: newAvailable,
         reason: reason || 'Inventory adjustment',
         notes: notes || '',
-        batchNumber: batchNumber || inv.batchNumber || '',
-        adminName: currentAdminName
-      }).returning();
+        batch_number: batchNumber || inv.batchNumber || '',
+        admin_name: currentAdminName,
+      }).select();
+      throwIfError(logErr);
+      const logEntry = toCamelRow(logEntryRaw[0]);
 
       return res.status(200).json({
         success: true,
@@ -390,12 +404,13 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Valid productId is required' });
       }
 
-      const [prod] = await db.select().from(products).where(eq(products.id, pId));
-      if (!prod) {
+      const { data: prodRaw } = await supabase.from('products').select('*').eq('id', pId).maybeSingle();
+      if (!prodRaw) {
         return res.status(404).json({ error: 'Product not found' });
       }
+      const prod = toCamelRow(prodRaw);
 
-      const updateData = { updatedAt: new Date() };
+      const updateData = { updatedAt: new Date().toISOString() };
       if (reorderLevel !== undefined) updateData.reorderLevel = Math.max(0, parseInt(reorderLevel, 10) || 0);
       if (costPrice !== undefined) updateData.costPrice = Math.max(0, parseInt(costPrice, 10) || 0);
       if (expiryDate !== undefined) updateData.expiryDate = expiryDate;
@@ -403,25 +418,27 @@ export default async function handler(req, res) {
       if (location !== undefined) updateData.location = location;
       if (incomingStock !== undefined) updateData.incomingStock = Math.max(0, parseInt(incomingStock, 10) || 0);
 
-      const [updatedInv] = await db
-        .update(inventory)
-        .set(updateData)
-        .where(eq(inventory.productId, pId))
-        .returning();
+      const { data: updatedInvRaw, error: updErr } = await supabase.from('inventory')
+        .update(toSnakeRow(updateData))
+        .eq('product_id', pId)
+        .select();
+      throwIfError(updErr);
+      const updatedInv = toCamelRow(updatedInvRaw[0]);
 
       // Log config change
-      await db.insert(inventoryLogs).values({
-        productId: pId,
-        productName: prod.name,
-        changeType: 'CONFIG_UPDATE',
+      const { error: logErr } = await supabase.from('inventory_logs').insert({
+        product_id: pId,
+        product_name: prod.name,
+        change_type: 'CONFIG_UPDATE',
         quantity: 0,
-        stockBefore: updatedInv.availableStock,
-        stockAfter: updatedInv.availableStock,
+        stock_before: updatedInv.availableStock,
+        stock_after: updatedInv.availableStock,
         reason: `Updated reorder settings: Reorder Lvl=${updatedInv.reorderLevel}, Exp=${updatedInv.expiryDate || 'N/A'}, Batch=${updatedInv.batchNumber || 'N/A'}`,
         notes: `Cost: ₹${updatedInv.costPrice}, Incoming: ${updatedInv.incomingStock}`,
-        batchNumber: updatedInv.batchNumber || '',
-        adminName: currentAdminName
+        batch_number: updatedInv.batchNumber || '',
+        admin_name: currentAdminName,
       });
+      throwIfError(logErr);
 
       return res.status(200).json({ success: true, inventory: updatedInv });
     }

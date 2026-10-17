@@ -1,5 +1,4 @@
-import { db, orders, orderItems, users, inventory, inventoryLogs } from '../../db/index.js';
-import { eq, desc } from 'drizzle-orm';
+import { getSupabase, toSnakeRow, toCamelRow, toCamelRows, throwIfError } from '../../db/supabase.js';
 import { setCorsHeaders } from '../_cors.js';
 import { isAdminRequest } from '../_adminAuth.js';
 import { sendCustomerOrderStatusUpdateEmail, sendViaResend } from '../_email.js';
@@ -20,6 +19,7 @@ export default async function handler(req, res) {
   if (!adminOk) return res.status(403).json({ error: 'Forbidden: admin access required' });
 
   const { id, resource, action } = req.query;
+  const supabase = getSupabase();
 
   try {
     // ── 1. Users & Customer Segmentation: ?resource=users or ?action=users ─────
@@ -36,19 +36,27 @@ export default async function handler(req, res) {
           return res.status(400).json({ error: `Invalid segment. Valid: ${allowedSegments.join(', ')}, or null to reset to auto` });
         }
 
-        const updated = await db.update(users)
-          .set({ segmentOverride: requested, updatedAt: new Date() })
-          .where(eq(users.id, id))
-          .returning();
+        const { data: updated, error } = await supabase.from('users')
+          .update({ segment_override: requested, updated_at: new Date().toISOString() })
+          .eq('id', id)
+          .select();
+        throwIfError(error);
         if (!updated.length) return res.status(404).json({ error: 'Customer not found' });
 
-        return res.status(200).json(updated[0]);
+        return res.status(200).json(toCamelRow(updated[0]));
       }
 
       if (req.method === 'GET') {
-        const allUsers = await db.select().from(users).orderBy(desc(users.createdAt));
-        const allOrders = await db.select().from(orders).orderBy(desc(orders.createdAt));
-        const allItems = await db.select().from(orderItems);
+        const { data: usersRaw, error: usersErr } = await supabase.from('users').select('*').order('created_at', { ascending: false });
+        throwIfError(usersErr);
+        const { data: ordersRaw, error: ordersErr } = await supabase.from('orders').select('*').order('created_at', { ascending: false });
+        throwIfError(ordersErr);
+        const { data: itemsRaw, error: itemsErr } = await supabase.from('order_items').select('*');
+        throwIfError(itemsErr);
+
+        const allUsers = toCamelRows(usersRaw);
+        const allOrders = toCamelRows(ordersRaw);
+        const allItems = toCamelRows(itemsRaw);
 
         const itemsByOrderId = new Map();
         for (const it of allItems) {
@@ -72,7 +80,7 @@ export default async function handler(req, res) {
           const totalSpent = userOrders.reduce((sum, o) => sum + Number(o.total || 0), 0);
           const orderCount = userOrders.length;
           const aov = orderCount > 0 ? Math.round(totalSpent / orderCount) : 0;
-          
+
           const lastOrder = userOrders[0];
           const firstOrder = userOrders[userOrders.length - 1];
           const lastOrderDate = lastOrder ? new Date(lastOrder.createdAt) : null;
@@ -129,15 +137,15 @@ export default async function handler(req, res) {
           // from the customer picker — resolve emails to phone numbers.
           const looksLikeEmail = bodyRecipients.some(r => String(r).includes('@'));
           if (looksLikeEmail) {
-            const allUsers = await db.select().from(users);
-            const emailToPhone = new Map(allUsers.map(u => [u.email, u.phone]));
+            const { data: allUsersRaw } = await supabase.from('users').select('email, phone');
+            const emailToPhone = new Map((allUsersRaw || []).map(u => [u.email, u.phone]));
             phones = bodyRecipients.map(r => emailToPhone.get(r)).filter(Boolean);
           } else {
             phones = bodyRecipients.filter(Boolean);
           }
         } else {
-          const allUsers = await db.select().from(users);
-          phones = allUsers.map(u => u.phone).filter(Boolean);
+          const { data: allUsersRaw } = await supabase.from('users').select('phone');
+          phones = (allUsersRaw || []).map(u => u.phone).filter(Boolean);
         }
 
         if (phones.length === 0) {
@@ -156,8 +164,8 @@ export default async function handler(req, res) {
       if (Array.isArray(bodyRecipients) && bodyRecipients.length > 0) {
         recipients = bodyRecipients.filter(Boolean);
       } else {
-        const allUsers = await db.select().from(users);
-        recipients = allUsers.map(u => u.email).filter(Boolean);
+        const { data: allUsersRaw } = await supabase.from('users').select('email');
+        recipients = (allUsersRaw || []).map(u => u.email).filter(Boolean);
       }
 
       if (recipients.length === 0) {
@@ -204,9 +212,16 @@ export default async function handler(req, res) {
         return res.status(405).json({ error: 'Method not allowed' });
       }
 
-      const allOrders = await db.select().from(orders).orderBy(desc(orders.createdAt));
-      const allItems = await db.select().from(orderItems);
-      const allUsers = await db.select().from(users);
+      const { data: ordersRaw, error: ordersErr } = await supabase.from('orders').select('*').order('created_at', { ascending: false });
+      throwIfError(ordersErr);
+      const { data: itemsRaw, error: itemsErr } = await supabase.from('order_items').select('*');
+      throwIfError(itemsErr);
+      const { data: usersRaw, error: usersErr } = await supabase.from('users').select('*');
+      throwIfError(usersErr);
+
+      const allOrders = toCamelRows(ordersRaw);
+      const allItems = toCamelRows(itemsRaw);
+      const allUsers = toCamelRows(usersRaw);
 
       const userMap = new Map(allUsers.map(u => [u.id, u]));
 
@@ -232,25 +247,31 @@ export default async function handler(req, res) {
     }
 
     if (req.method === 'GET') {
-      const orderResult = await db.select().from(orders).where(eq(orders.id, parsedId));
-      if (!orderResult.length) return res.status(404).json({ error: 'Order not found' });
-      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, parsedId));
-      const [user] = await db.select().from(users).where(eq(users.id, orderResult[0].userId));
+      const { data: orderRaw, error: orderErr } = await supabase.from('orders').select('*').eq('id', parsedId).maybeSingle();
+      throwIfError(orderErr);
+      if (!orderRaw) return res.status(404).json({ error: 'Order not found' });
+      const order = toCamelRow(orderRaw);
+
+      const { data: itemsRaw } = await supabase.from('order_items').select('*').eq('order_id', parsedId);
+      const { data: userRaw } = await supabase.from('users').select('*').eq('id', order.userId).maybeSingle();
+      const user = userRaw ? toCamelRow(userRaw) : null;
+
       return res.status(200).json({
-        ...orderResult[0],
-        customerName: orderResult[0].customerName || user?.name || 'Customer',
-        customerPhone: orderResult[0].customerPhone || user?.phone || '',
-        customerEmail: orderResult[0].customerEmail || user?.email || '',
-        items
+        ...order,
+        customerName: order.customerName || user?.name || 'Customer',
+        customerPhone: order.customerPhone || user?.phone || '',
+        customerEmail: order.customerEmail || user?.email || '',
+        items: toCamelRows(itemsRaw)
       });
     }
 
     if (req.method === 'PATCH') {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-      const orderResult = await db.select().from(orders).where(eq(orders.id, parsedId));
-      if (!orderResult.length) return res.status(404).json({ error: 'Order not found' });
+      const { data: orderRaw, error: orderErr } = await supabase.from('orders').select('*').eq('id', parsedId).maybeSingle();
+      throwIfError(orderErr);
+      if (!orderRaw) return res.status(404).json({ error: 'Order not found' });
 
-      const currentOrder = orderResult[0];
+      const currentOrder = toCamelRow(orderRaw);
       const updateData = {};
 
       if (body.status !== undefined) {
@@ -259,7 +280,7 @@ export default async function handler(req, res) {
         }
         updateData.status = body.status;
         if (body.status === 'Cancelled' && !currentOrder.cancelledAt) {
-          updateData.cancelledAt = new Date();
+          updateData.cancelledAt = new Date().toISOString();
           if (body.cancellationReason) updateData.cancellationReason = body.cancellationReason;
         }
         if (body.paymentStatus === undefined) {
@@ -292,7 +313,7 @@ export default async function handler(req, res) {
         const totalRef = (currentOrder.refundAmount || 0) + refAmt;
         updateData.refundAmount = totalRef;
         updateData.refundReason = body.refundReason || 'Admin processed refund';
-        updateData.refundedAt = new Date();
+        updateData.refundedAt = new Date().toISOString();
         updateData.paymentStatus = totalRef >= currentOrder.total ? 'Refunded' : 'Partially Refunded';
       }
 
@@ -308,24 +329,24 @@ export default async function handler(req, res) {
       // Restock inventory on cancellation or return approval if requested
       if (body.restockOnCancel) {
         try {
-          const items = await db.select().from(orderItems).where(eq(orderItems.orderId, parsedId));
-          for (const item of items) {
+          const { data: itemsRaw } = await supabase.from('order_items').select('*').eq('order_id', parsedId);
+          for (const item of toCamelRows(itemsRaw)) {
             if (item.productId) {
-              const invList = await db.select().from(inventory).where(eq(inventory.productId, item.productId));
-              if (invList.length > 0) {
-                const currentStock = invList[0].availableStock || 0;
+              const { data: invRaw } = await supabase.from('inventory').select('*').eq('product_id', item.productId).maybeSingle();
+              if (invRaw) {
+                const currentStock = invRaw.available_stock || 0;
                 const newStock = currentStock + (item.quantity || 1);
-                await db.update(inventory).set({ availableStock: newStock }).where(eq(inventory.productId, item.productId));
-                await db.insert(inventoryLogs).values({
-                  productId: item.productId,
-                  productName: item.name,
-                  changeType: 'RETURN',
+                await supabase.from('inventory').update({ available_stock: newStock }).eq('product_id', item.productId);
+                await supabase.from('inventory_logs').insert({
+                  product_id: item.productId,
+                  product_name: item.name,
+                  change_type: 'RETURN',
                   quantity: item.quantity || 1,
-                  stockBefore: currentStock,
-                  stockAfter: newStock,
+                  stock_before: currentStock,
+                  stock_after: newStock,
                   reason: `Order #${parsedId} Cancelled / Restocked`,
                   notes: body.cancellationReason || body.returnReason || '',
-                  adminName: 'Admin Control Center'
+                  admin_name: 'Admin Control Center',
                 });
               }
             }
@@ -335,23 +356,25 @@ export default async function handler(req, res) {
         }
       }
 
-      const updated = await db
-        .update(orders)
-        .set(updateData)
-        .where(eq(orders.id, parsedId))
-        .returning();
+      const { data: updatedRaw, error: updErr } = await supabase.from('orders')
+        .update(toSnakeRow(updateData))
+        .eq('id', parsedId)
+        .select();
+      throwIfError(updErr);
+      const updated = toCamelRow(updatedRaw[0]);
 
       if (body.status && body.status !== currentOrder.status) {
         try {
-          const [customer] = await db.select().from(users).where(eq(users.id, currentOrder.userId));
+          const { data: customerRaw } = await supabase.from('users').select('*').eq('id', currentOrder.userId).maybeSingle();
+          const customer = customerRaw ? toCamelRow(customerRaw) : null;
           if (customer) {
             if (customer.email) {
-              sendCustomerOrderStatusUpdateEmail(customer.email, customer.name, updated[0], body.status).catch(err => {
+              sendCustomerOrderStatusUpdateEmail(customer.email, customer.name, updated, body.status).catch(err => {
                 console.error("[EMAIL ERROR] Customer status email failed:", err.message);
               });
             }
             if (customer.phone) {
-              sendCustomerOrderStatusSMS(customer.phone, customer.name, updated[0], body.status).catch(err => {
+              sendCustomerOrderStatusSMS(customer.phone, customer.name, updated, body.status).catch(err => {
                 console.error("[SMS ERROR] Customer status SMS failed:", err.message);
               });
             }
@@ -361,8 +384,8 @@ export default async function handler(req, res) {
         }
       }
 
-      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, parsedId));
-      return res.status(200).json({ ...updated[0], items });
+      const { data: itemsRaw } = await supabase.from('order_items').select('*').eq('order_id', parsedId);
+      return res.status(200).json({ ...updated, items: toCamelRows(itemsRaw) });
     }
 
     return res.status(405).json({ error: 'Method not allowed' });

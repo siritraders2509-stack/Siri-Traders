@@ -1,5 +1,4 @@
-import { db, coupons } from '../db/index.js';
-import { eq, or } from 'drizzle-orm';
+import { getSupabase, toCamelRow, toCamelRows, throwIfError } from '../db/supabase.js';
 import { setCorsHeaders } from './_cors.js';
 import { isAdminRequest } from './_adminAuth.js';
 
@@ -12,13 +11,6 @@ const safeInt = (val, fallback = 0) => {
   return Math.max(0, Math.min(MAX_PG_INT, num));
 };
 
-// The one-time schema migration that used to run here (adding bulk-pricing
-// /targeting columns to `coupons`) has long since applied in production —
-// re-checking it via ALTER TABLE on every cold Workers isolate burns a real
-// Hyperdrive query for no benefit, which is exactly what exhausted the
-// daily Hyperdrive quota. Removed; if a genuinely new column is ever
-// needed, add it as a real migration instead of a runtime guard like this.
-
 export default async function handler(req, res) {
   setCorsHeaders(req, res);
 
@@ -27,12 +19,14 @@ export default async function handler(req, res) {
   }
 
   const targetId = req.query.id || (typeof req.body === 'object' ? req.body?.id : null);
+  const supabase = getSupabase();
 
   if (req.method === 'GET') {
     try {
-      const allCoupons = await db.select().from(coupons);
+      const { data, error } = await supabase.from('coupons').select('*');
+      throwIfError(error);
       res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
-      return res.status(200).json(allCoupons || []);
+      return res.status(200).json(toCamelRows(data));
     } catch (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -44,10 +38,11 @@ export default async function handler(req, res) {
     return res.status(403).json({ error: 'Forbidden: admin access required' });
   }
 
+  let code;
   if (req.method === 'POST') {
     try {
       const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-      const code = String(body.code || '').trim().toUpperCase();
+      code = String(body.code || '').trim().toUpperCase();
       if (!code) {
         return res.status(400).json({ error: 'code is required' });
       }
@@ -58,32 +53,30 @@ export default async function handler(req, res) {
         code,
         type: body.type || 'flat',
         value: safeInt(body.value, 0),
-        minOrder: safeInt(body.minOrder, 0),
-        maxDiscount: body.maxDiscount ? safeInt(body.maxDiscount, null) : null,
-        buyQuantity: safeInt(body.buyQuantity, 1),
-        getQuantity: safeInt(body.getQuantity, 1),
-        targetType: body.targetType || 'all',
-        targetCategory: body.targetCategory || null,
-        targetProductId: body.targetProductId ? safeInt(body.targetProductId, null) : null,
-        targetCustomerEmail: body.targetCustomerEmail || null,
-        usageLimit: body.usageLimit ? safeInt(body.usageLimit, null) : null,
-        perUserLimit: safeInt(body.perUserLimit, 1),
-        timesUsed: safeInt(body.timesUsed, 0),
-        totalDiscountGiven: safeInt(body.totalDiscountGiven, 0),
-        startDate: body.startDate || null,
-        endDate: body.endDate || null,
+        min_order: safeInt(body.minOrder, 0),
+        max_discount: body.maxDiscount ? safeInt(body.maxDiscount, null) : null,
+        buy_quantity: safeInt(body.buyQuantity, 1),
+        get_quantity: safeInt(body.getQuantity, 1),
+        target_type: body.targetType || 'all',
+        target_category: body.targetCategory || null,
+        target_product_id: body.targetProductId ? safeInt(body.targetProductId, null) : null,
+        target_customer_email: body.targetCustomerEmail || null,
+        usage_limit: body.usageLimit ? safeInt(body.usageLimit, null) : null,
+        per_user_limit: safeInt(body.perUserLimit, 1),
+        times_used: safeInt(body.timesUsed, 0),
+        total_discount_given: safeInt(body.totalDiscountGiven, 0),
+        start_date: body.startDate || null,
+        end_date: body.endDate || null,
         title: body.title || '',
         description: body.description || '',
-        customerType: body.customerType || 'retail',
-        active: body.active !== false
+        customer_type: body.customerType || 'retail',
+        active: body.active !== false,
       };
 
-      const [saved] = await db.insert(coupons).values(values).onConflictDoUpdate({
-        target: coupons.code,
-        set: values
-      }).returning();
+      const { data, error } = await supabase.from('coupons').upsert(values, { onConflict: 'code' }).select();
+      throwIfError(error);
 
-      return res.status(201).json(saved || values);
+      return res.status(201).json(toCamelRow(data?.[0]) || toCamelRow(values));
     } catch (err) {
       if (err.message?.includes('coupons_code_unique') || err.code === '23505') {
         return res.status(400).json({ error: `Coupon code "${code}" already exists. Please choose a unique coupon code or edit the existing coupon.` });
@@ -103,31 +96,32 @@ export default async function handler(req, res) {
       if (body.code !== undefined) patch.code = String(body.code).trim().toUpperCase();
       if (body.type !== undefined) patch.type = body.type;
       if (body.value !== undefined) patch.value = safeInt(body.value, 0);
-      if (body.minOrder !== undefined) patch.minOrder = safeInt(body.minOrder, 0);
-      if (body.maxDiscount !== undefined) patch.maxDiscount = body.maxDiscount ? safeInt(body.maxDiscount, null) : null;
-      if (body.buyQuantity !== undefined) patch.buyQuantity = safeInt(body.buyQuantity, 1);
-      if (body.getQuantity !== undefined) patch.getQuantity = safeInt(body.getQuantity, 1);
-      if (body.targetType !== undefined) patch.targetType = body.targetType;
-      if (body.targetCategory !== undefined) patch.targetCategory = body.targetCategory;
-      if (body.targetProductId !== undefined) patch.targetProductId = body.targetProductId ? safeInt(body.targetProductId, null) : null;
-      if (body.targetCustomerEmail !== undefined) patch.targetCustomerEmail = body.targetCustomerEmail;
-      if (body.usageLimit !== undefined) patch.usageLimit = body.usageLimit ? safeInt(body.usageLimit, null) : null;
-      if (body.perUserLimit !== undefined) patch.perUserLimit = safeInt(body.perUserLimit, 1);
-      if (body.timesUsed !== undefined) patch.timesUsed = safeInt(body.timesUsed, 0);
-      if (body.totalDiscountGiven !== undefined) patch.totalDiscountGiven = safeInt(body.totalDiscountGiven, 0);
-      if (body.startDate !== undefined) patch.startDate = body.startDate;
-      if (body.endDate !== undefined) patch.endDate = body.endDate;
+      if (body.minOrder !== undefined) patch.min_order = safeInt(body.minOrder, 0);
+      if (body.maxDiscount !== undefined) patch.max_discount = body.maxDiscount ? safeInt(body.maxDiscount, null) : null;
+      if (body.buyQuantity !== undefined) patch.buy_quantity = safeInt(body.buyQuantity, 1);
+      if (body.getQuantity !== undefined) patch.get_quantity = safeInt(body.getQuantity, 1);
+      if (body.targetType !== undefined) patch.target_type = body.targetType;
+      if (body.targetCategory !== undefined) patch.target_category = body.targetCategory;
+      if (body.targetProductId !== undefined) patch.target_product_id = body.targetProductId ? safeInt(body.targetProductId, null) : null;
+      if (body.targetCustomerEmail !== undefined) patch.target_customer_email = body.targetCustomerEmail;
+      if (body.usageLimit !== undefined) patch.usage_limit = body.usageLimit ? safeInt(body.usageLimit, null) : null;
+      if (body.perUserLimit !== undefined) patch.per_user_limit = safeInt(body.perUserLimit, 1);
+      if (body.timesUsed !== undefined) patch.times_used = safeInt(body.timesUsed, 0);
+      if (body.totalDiscountGiven !== undefined) patch.total_discount_given = safeInt(body.totalDiscountGiven, 0);
+      if (body.startDate !== undefined) patch.start_date = body.startDate;
+      if (body.endDate !== undefined) patch.end_date = body.endDate;
       if (body.title !== undefined) patch.title = body.title;
       if (body.description !== undefined) patch.description = body.description;
-      if (body.customerType !== undefined) patch.customerType = body.customerType;
+      if (body.customerType !== undefined) patch.customer_type = body.customerType;
       if (body.active !== undefined) patch.active = Boolean(body.active);
 
       const searchStr = String(targetId).trim();
-      const [updated] = await db.update(coupons).set(patch).where(
-        or(eq(coupons.id, searchStr), eq(coupons.code, searchStr.toUpperCase()))
-      ).returning();
+      const { data, error } = await supabase.from('coupons').update(patch)
+        .or(`id.eq.${searchStr},code.eq.${searchStr.toUpperCase()}`)
+        .select();
+      throwIfError(error);
 
-      return res.status(200).json(updated || { id: targetId, ...patch });
+      return res.status(200).json(toCamelRow(data?.[0]) || { id: targetId, ...toCamelRow(patch) });
     } catch (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -140,9 +134,9 @@ export default async function handler(req, res) {
       }
 
       const searchStr = String(targetId).trim();
-      await db.delete(coupons).where(
-        or(eq(coupons.id, searchStr), eq(coupons.code, searchStr.toUpperCase()))
-      );
+      const { error } = await supabase.from('coupons').delete()
+        .or(`id.eq.${searchStr},code.eq.${searchStr.toUpperCase()}`);
+      throwIfError(error);
       return res.status(200).json({ success: true, id: targetId });
     } catch (err) {
       return res.status(500).json({ error: err.message });
