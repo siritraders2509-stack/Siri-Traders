@@ -131,6 +131,10 @@ export default async function handler(req, res) {
         if (order.return_status && order.return_status !== 'None') {
           return res.status(400).json({ error: 'A return has already been requested for this order.' });
         }
+        const hoursSincePurchase = (Date.now() - new Date(order.created_at).getTime()) / (1000 * 60 * 60);
+        if (hoursSincePurchase > 24) {
+          return res.status(400).json({ error: 'Returns are only accepted within 24 hours of purchase.' });
+        }
 
         const { data: updatedRows, error: updErr } = await supabase.from('orders').update({
           return_status: 'Requested',

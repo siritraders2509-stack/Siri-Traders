@@ -198,7 +198,8 @@ const Orders = () => {
       address: { address: order.deliveryAddress },
       items: order.items || [],
       total: order.total,
-      returnStatus: order.returnStatus || 'None'
+      returnStatus: order.returnStatus || 'None',
+      createdAt: order.createdAt
     };
   }) : localOrders.map(order => {
     let rawId = order.id;
@@ -357,22 +358,35 @@ const Orders = () => {
                             <FiRefreshCw /> {reordered === order.id ? 'Added to Cart!' : 'Reorder'}
                           </button>
                         </div>
-                        {order.status === 'delivered' && (order.returnStatus === 'None') && !returnedIds.has(order.id) && (
-                          <div className="orders__detail-actions">
-                            <button
-                              className="orders__track-btn"
-                              style={{ color: '#DC2626', borderColor: 'rgba(220,38,38,0.35)' }}
-                              onClick={() => openReturnModal(order)}
-                            >
-                              Return Order
-                            </button>
-                          </div>
-                        )}
-                        {(order.returnStatus && order.returnStatus !== 'None') || returnedIds.has(order.id) ? (
-                          <div className="orders__reviewed-badge" style={{ marginTop: '8px' }}>
-                            <FiCheckCircle size={12} /> Return {returnedIds.has(order.id) ? 'requested' : order.returnStatus?.toLowerCase()}
-                          </div>
-                        ) : null}
+                        {(() => {
+                          const alreadyReturned = (order.returnStatus && order.returnStatus !== 'None') || returnedIds.has(order.id);
+                          if (order.status !== 'delivered' || alreadyReturned) {
+                            return alreadyReturned ? (
+                              <div className="orders__reviewed-badge" style={{ marginTop: '8px' }}>
+                                <FiCheckCircle size={12} /> Return {returnedIds.has(order.id) ? 'requested' : order.returnStatus?.toLowerCase()}
+                              </div>
+                            ) : null;
+                          }
+                          const withinWindow = order.createdAt && (Date.now() - new Date(order.createdAt).getTime()) <= 24 * 60 * 60 * 1000;
+                          if (!withinWindow) {
+                            return (
+                              <div className="orders__reviewed-badge" style={{ marginTop: '8px', opacity: 0.75 }}>
+                                Return window closed (24 hrs from purchase)
+                              </div>
+                            );
+                          }
+                          return (
+                            <div className="orders__detail-actions">
+                              <button
+                                className="orders__track-btn"
+                                style={{ color: '#DC2626', borderColor: 'rgba(220,38,38,0.35)' }}
+                                onClick={() => openReturnModal(order)}
+                              >
+                                Return Order
+                              </button>
+                            </div>
+                          );
+                        })()}
                       </div>
                     )}
                   </div>
