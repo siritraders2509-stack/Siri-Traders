@@ -1,4 +1,4 @@
-name = "siri-traders-app"
+name = "siri-traders"
 compatibility_date = "2026-09-20"
 # nodejs_compat is required for the npm packages reused as-is from the old
 # Vercel backend (bcryptjs, jsonwebtoken, cookie, @clerk/backend, drizzle-orm,
@@ -18,4 +18,4 @@ pages_build_output_dir = "frontend/dist"
 # Plain secrets/vars are set in the Cloudflare Pages dashboard (Settings ->
 # Environment variables), separately for Production and Preview — NOT here,
 # since this file is committed to the repo. See .env.example for the full
-# list (DATABASE_URL is dropped in favor of the Hyperdrive binding above).
+# list.
