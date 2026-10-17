@@ -4260,6 +4260,35 @@ const Admin = () => {
                               <option value="Unpaid">🔴 Unpaid</option>
                             </select>
                           </div>
+
+                          {order.returnStatus && order.returnStatus !== 'None' && (
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                              <span style={{ fontSize: '10px', fontWeight: 800, color: '#687466', textTransform: 'uppercase', marginBottom: '2px' }}>Refund Status</span>
+                              <select
+                                value={order.paymentStatus === 'Refunded' ? 'Refunded' : 'Yet to Refund'}
+                                className="admin-status-select"
+                                style={{
+                                  height: '30px',
+                                  fontSize: '11.5px',
+                                  borderRadius: '6px',
+                                  fontWeight: 700,
+                                  borderColor: order.paymentStatus === 'Refunded' ? '#D8B4FE' : '#FDE68A',
+                                  background: order.paymentStatus === 'Refunded' ? '#FAF5FF' : '#FFFBEB',
+                                  color: order.paymentStatus === 'Refunded' ? '#6B21A8' : '#92400E'
+                                }}
+                                onChange={(e) => {
+                                  if (e.target.value === 'Refunded') {
+                                    handleUpdateOrder(order.id, { refundAmount: order.total, refundReason: 'Return refund processed' }, `Order #${order.id} marked as refunded`);
+                                  } else {
+                                    handleUpdateOrder(order.id, { paymentStatus: 'Paid' }, `Order #${order.id} marked as yet to refund`);
+                                  }
+                                }}
+                              >
+                                <option value="Yet to Refund">🟡 Yet to Refund</option>
+                                <option value="Refunded">🟣 Refunded</option>
+                              </select>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
