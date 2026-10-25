@@ -66,14 +66,20 @@ export const SiteDataProvider = ({ children }) => {
   // ok:false means the request itself failed (network/5xx) — keep whatever's
   // on screen (static fallback or last good fetch). ok:true with an empty
   // array is a legitimate "nothing here" and must replace the fallback.
-  const fetchJson = async (url) => {
-    try {
-      const r = await fetch(url);
-      if (!r.ok) return { ok: false, data: null };
-      return { ok: true, data: await r.json() };
-    } catch {
-      return { ok: false, data: null };
+  //
+  // Retries a couple of times with backoff first — a single transient 500
+  // or cold-start blip used to immediately fall back to an empty/stale
+  // cached list (most visible as categories "disappearing" on a fresh
+  // device/browser with no prior cache to paint from).
+  const fetchJson = async (url, retries = 2) => {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const r = await fetch(url);
+        if (r.ok) return { ok: true, data: await r.json() };
+      } catch { /* network error — fall through to retry/backoff below */ }
+      if (attempt < retries) await new Promise(resolve => setTimeout(resolve, 400 * (attempt + 1)));
     }
+    return { ok: false, data: null };
   };
 
   const fetchSiteData = useCallback(async (showLoading = false) => {
