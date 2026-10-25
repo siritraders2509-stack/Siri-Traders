@@ -1,6 +1,8 @@
 import { getSupabase, toCamelRow, toCamelRows } from '../db/supabase.js';
 import { setCorsHeaders } from './_cors.js';
 import { isAdminRequest } from './_adminAuth.js';
+import { getSessionFromRequest } from './_adminSession.js';
+import { logActivity } from './admin/activity.js';
 
 export default async function handler(req, res) {
   setCorsHeaders(req, res);
@@ -67,17 +69,29 @@ export default async function handler(req, res) {
       const { data: targetCat } = await supabase.from('categories').select('name').eq('id', catId).maybeSingle();
       const catName = targetCat?.name;
 
+      let deletedProducts = [];
       try {
-        if (catName) {
-          await supabase.from('products').delete().or(`category.eq.${catId},category.eq.${catName}`);
-        } else {
-          await supabase.from('products').delete().eq('category', catId);
-        }
+        const delQuery = catName
+          ? supabase.from('products').delete().or(`category.eq.${catId},category.eq.${catName}`)
+          : supabase.from('products').delete().eq('category', catId);
+        const { data } = await delQuery.select('id');
+        deletedProducts = data || [];
       } catch { /* best-effort, same as before */ }
 
       const { error } = await supabase.from('categories').delete().eq('id', catId);
       if (error) throw error;
-      return res.status(200).json({ success: true, id: catId });
+
+      const session = getSessionFromRequest(req);
+      await logActivity(supabase, {
+        action: 'DELETE',
+        entityType: 'category',
+        entityId: catId,
+        entityName: catName || catId,
+        adminName: session?.name || session?.email,
+        details: { cascadedProductCount: deletedProducts.length, cascadedProductIds: deletedProducts.map(p => p.id) },
+      });
+
+      return res.status(200).json({ success: true, id: catId, cascadedProductCount: deletedProducts.length });
     } catch (err) {
       console.error('Error deleting category:', err);
       return res.status(500).json({ error: `Failed to delete category: ${err.message}` });

@@ -307,4 +307,18 @@ CREATE TABLE IF NOT EXISTS seo_redirects (
   active BOOLEAN DEFAULT true
 );
 
+-- Records every category/product/delivery-zone deletion (who, what, when,
+-- and how much was cascaded) so a sudden drop in catalog data is always
+-- explainable instead of a mystery.
+CREATE TABLE IF NOT EXISTS admin_activity_log (
+  id SERIAL PRIMARY KEY,
+  action TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT,
+  entity_name TEXT,
+  admin_name TEXT,
+  details JSONB,
+  created_at TIMESTAMP DEFAULT now() NOT NULL
+);
+
 NOTIFY pgrst, 'reload schema';

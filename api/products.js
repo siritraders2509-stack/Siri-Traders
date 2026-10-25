@@ -2,6 +2,8 @@ import { getSupabase, toSnakeRow, toCamelRow, toCamelRows, throwIfError } from '
 import { z } from 'zod';
 import { setCorsHeaders } from './_cors.js';
 import { isAdminRequest } from './_adminAuth.js';
+import { getSessionFromRequest } from './_adminSession.js';
+import { logActivity } from './admin/activity.js';
 
 const productSchema = z.object({
   name: z.string().min(1),
@@ -257,7 +259,7 @@ export default async function handler(req, res) {
       const adminOk = await isAdminRequest(req);
       if (!adminOk) return res.status(403).json({ error: 'Forbidden: admin access required' });
 
-      const { data: existing } = await supabase.from('products').select('id').eq('id', parsedId).maybeSingle();
+      const { data: existing } = await supabase.from('products').select('id, name').eq('id', parsedId).maybeSingle();
       if (!existing) {
         return res.status(404).json({ error: 'Product not found' });
       }
@@ -271,6 +273,16 @@ export default async function handler(req, res) {
         await supabase.from('inventory').delete().eq('product_id', parsedId);
         const { error } = await supabase.from('products').delete().eq('id', parsedId);
         throwIfError(error);
+
+        const session = getSessionFromRequest(req);
+        await logActivity(supabase, {
+          action: 'DELETE',
+          entityType: 'product',
+          entityId: parsedId,
+          entityName: existing.name,
+          adminName: session?.name || session?.email,
+        });
+
         return res.status(200).json({ success: true, id: parsedId });
       } catch (delErr) {
         console.error('Error deleting product from database:', delErr);

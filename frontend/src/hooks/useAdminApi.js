@@ -198,6 +198,12 @@ export async function apiFetchInventoryLogs(productId) {
   return res.json();
 }
 
+export async function apiFetchActivityLog() {
+  const res = await fetch('/api/admin/activity', withCreds);
+  if (!res.ok) throw new Error('Failed to load activity log');
+  return res.json();
+}
+
 // ── Orders / Users (admin) ────────────────────────────────────────────────
 
 export async function apiFetchAllOrders() {
@@ -576,6 +582,7 @@ export function useAdminApi() {
     adjustStock: apiAdjustStock,
     updateInventoryConfig: apiUpdateInventoryConfig,
     fetchInventoryLogs: apiFetchInventoryLogs,
+    fetchActivityLog: apiFetchActivityLog,
 
     fetchAllOrders: apiFetchAllOrders,
     updateOrderStatus: apiUpdateOrderStatus,

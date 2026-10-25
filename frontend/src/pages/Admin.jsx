@@ -237,7 +237,7 @@ const downloadCsv = (filename, rows) => {
 };
 
 const ADMIN_ROLE_PERMISSIONS = {
-  Owner: ['dashboard','inventory','sales-stats','orders','customers','reviews','cms','home-sections','products','retail-products','wholesale-products','offers','festive-offers','bestsellers','delivery-zones','min-order-value','broadcast','admins'],
+  Owner: ['dashboard','inventory','sales-stats','orders','customers','reviews','cms','home-sections','products','retail-products','wholesale-products','offers','festive-offers','bestsellers','delivery-zones','min-order-value','broadcast','admins','activity-log'],
   'Super Admin': ['dashboard','inventory','sales-stats','orders','customers','reviews','cms','home-sections','products','retail-products','wholesale-products','offers','festive-offers','bestsellers','delivery-zones','min-order-value','broadcast'],
   'Product Manager': ['dashboard','inventory','products','retail-products','wholesale-products','festive-offers','reviews','bestsellers','home-sections','min-order-value'],
   'Order Manager': ['dashboard','inventory','orders','customers','delivery-zones','min-order-value'],
@@ -291,7 +291,8 @@ const ADMIN_NAV_SECTIONS = [
   {
     title: 'ADMINISTRATION',
     items: [
-      ['admins', 'Admin Members', FiLock]
+      ['admins', 'Admin Members', FiLock],
+      ['activity-log', 'Activity Log', FiActivity]
     ]
   }
 ];
@@ -616,6 +617,10 @@ const Admin = () => {
   const [inventoryLogs, setInventoryLogs] = useState([]);
   const [logsLoading, setLogsLoading] = useState(false);
 
+  // ── Admin Activity Log State ── (category/product/delivery-zone deletions)
+  const [activityLog, setActivityLog] = useState(null);
+  const [activityLogLoading, setActivityLogLoading] = useState(false);
+
   // Modals for Stock Adjustment & History
   const [adjustModalItem, setAdjustModalItem] = useState(null);
   const [adjustForm, setAdjustForm] = useState({
@@ -810,6 +815,19 @@ const Admin = () => {
     }
   };
 
+  // ── Load Admin Activity Log ──
+  const loadActivityLog = async () => {
+    setActivityLogLoading(true);
+    try {
+      const log = await adminApi.fetchActivityLog();
+      setActivityLog(log);
+    } catch (err) {
+      console.error('Failed to load activity log:', err);
+    } finally {
+      setActivityLogLoading(false);
+    }
+  };
+
   // ── Load initial data ──
   useEffect(() => {
     loadProductsFromDb();
@@ -861,6 +879,8 @@ const Admin = () => {
     } else if (activeTab === 'inventory') {
       loadInventory(false);
       if (inventoryFilter === 'logs' && !inventoryLogs) loadInventoryLogs(false);
+    } else if (activeTab === 'activity-log') {
+      if (!activityLog) loadActivityLog();
     } else if (activeTab === 'orders') {
       loadOrders();
     } else if (activeTab === 'customers') {
@@ -7188,6 +7208,44 @@ const Admin = () => {
                     </div>
                   );
                 })}
+              </div>
+            </section>
+          )}
+
+          {activeTab === 'activity-log' && (
+            <section className="admin-grid">
+              <div className="admin-card" style={{ gridColumn: '1 / -1' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                  <h2 style={{ margin: 0 }}>Destructive Action Log</h2>
+                  <button className="admin__ghost" onClick={loadActivityLog} disabled={activityLogLoading}>
+                    <FiRefreshCw size={12} /> {activityLogLoading ? 'Loading...' : 'Refresh'}
+                  </button>
+                </div>
+                <p style={{ fontSize: '12.5px', color: '#687466', marginTop: 0, marginBottom: '16px' }}>
+                  Every category, product, and delivery zone deletion is recorded here — who did it, when, and what was affected — so a sudden drop in catalog data is always explainable.
+                </p>
+                {activityLogLoading && !activityLog ? (
+                  <p style={{ color: '#687466' }}>Loading...</p>
+                ) : !activityLog || activityLog.length === 0 ? (
+                  <p style={{ color: '#687466' }}>No destructive actions recorded yet.</p>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {activityLog.map(entry => (
+                      <div key={entry.id} className="admin-row admin-row--plain" style={{ alignItems: 'flex-start' }}>
+                        <FiTrash2 color="#991B1B" />
+                        <span>
+                          <strong>{entry.action}</strong> {entry.entityType} — {entry.entityName || entry.entityId}
+                          {entry.details?.cascadedProductCount > 0 && (
+                            <span style={{ color: '#991B1B', fontWeight: 700 }}> ({entry.details.cascadedProductCount} products cascaded)</span>
+                          )}
+                          <small>
+                            by {entry.adminName || 'Admin'} · {entry.createdAt ? new Date(entry.createdAt).toLocaleString('en-IN') : ''}
+                          </small>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </section>
           )}
