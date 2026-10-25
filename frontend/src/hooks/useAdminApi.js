@@ -163,6 +163,16 @@ export async function apiDeleteProduct(id) {
   return asJson(res, 'Failed to delete product');
 }
 
+export async function apiBulkImportProducts(products) {
+  const res = await fetch('/api/products?resource=bulk-import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    ...withCreds,
+    body: JSON.stringify({ products }),
+  });
+  return asJson(res, 'Failed to import products');
+}
+
 // ── Inventory Management ──────────────────────────────────────────────────
 
 export async function apiFetchInventory() {
@@ -577,6 +587,7 @@ export function useAdminApi() {
     createProduct: apiCreateProduct,
     updateProduct: apiUpdateProduct,
     deleteProduct: apiDeleteProduct,
+    bulkImportProducts: apiBulkImportProducts,
 
     fetchInventory: apiFetchInventory,
     adjustStock: apiAdjustStock,

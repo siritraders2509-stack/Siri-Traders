@@ -162,6 +162,90 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
+    // ── Bulk CSV import: /api/products?resource=bulk-import ────────────
+    // Built after a category delete wiped ~200 manually-entered products
+    // with no way to get them back — so re-entering a large batch (from a
+    // spreadsheet or supplier list) is a single upload instead of hundreds
+    // of individual forms. Every row is validated and inserted on its own,
+    // so one bad row doesn't block the rest, and the admin gets a precise
+    // per-row report of what succeeded and what didn't (and why).
+    if (resource === 'bulk-import') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+      const adminOk = await isAdminRequest(req);
+      if (!adminOk) return res.status(403).json({ error: 'Forbidden: admin access required' });
+
+      const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+      const rows = Array.isArray(body?.products) ? body.products : null;
+      if (!rows || rows.length === 0) {
+        return res.status(400).json({ error: 'No product rows provided' });
+      }
+      if (rows.length > 2000) {
+        return res.status(400).json({ error: 'Too many rows in one import (max 2000) — split into smaller files' });
+      }
+
+      const { data: existingCats } = await supabase.from('categories').select('id, name');
+      const catIds = new Set((existingCats || []).map(c => c.id));
+      const catByName = new Map((existingCats || []).map(c => [String(c.name).toLowerCase(), c.id]));
+      const createdCategoryIds = new Set();
+
+      const results = [];
+      let successCount = 0;
+      for (let i = 0; i < rows.length; i++) {
+        const rowNum = i + 2; // +1 for 0-index, +1 for the CSV header row
+        const raw = normalizeProductPayload(rows[i]);
+
+        // A CSV category column holds either an existing category's id or
+        // its display name — resolve it to an id, auto-creating a new
+        // category from the name if neither matches anything on file.
+        if (raw.category) {
+          const catInput = String(raw.category).trim();
+          if (!catIds.has(catInput)) {
+            const byName = catByName.get(catInput.toLowerCase());
+            if (byName) {
+              raw.category = byName;
+            } else {
+              const newCatId = catInput.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || `cat-${Date.now()}-${i}`;
+              if (!catIds.has(newCatId)) {
+                const { error: catErr } = await supabase.from('categories').insert({ id: newCatId, name: catInput, image: '', color: '#F1F8E9', item_count: 0 });
+                if (!catErr) {
+                  catIds.add(newCatId);
+                  catByName.set(catInput.toLowerCase(), newCatId);
+                  createdCategoryIds.add(newCatId);
+                }
+              }
+              raw.category = newCatId;
+            }
+          }
+        }
+
+        const validation = productSchema.safeParse(raw);
+        if (!validation.success) {
+          results.push({ row: rowNum, name: raw.name || '(no name)', success: false, error: validation.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join('; ') });
+          continue;
+        }
+
+        const { error } = await supabase.from('products').insert(toSnakeRow(validation.data));
+        if (error) {
+          results.push({ row: rowNum, name: raw.name, success: false, error: error.message });
+        } else {
+          successCount++;
+          results.push({ row: rowNum, name: raw.name, success: true });
+        }
+      }
+
+      const session = getSessionFromRequest(req);
+      await logActivity(supabase, {
+        action: 'BULK_IMPORT',
+        entityType: 'product',
+        entityName: `${successCount} of ${rows.length} rows`,
+        adminName: session?.name || session?.email,
+        details: { successCount, failCount: rows.length - successCount, createdCategoryIds: [...createdCategoryIds] },
+      });
+
+      return res.status(200).json({ successCount, failCount: rows.length - successCount, results });
+    }
+
     // ── Products Collection: /api/products ─────────────────────────────
     if (!id) {
       if (req.method === 'GET') {

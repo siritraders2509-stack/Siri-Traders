@@ -236,6 +236,86 @@ const downloadCsv = (filename, rows) => {
   URL.revokeObjectURL(url);
 };
 
+// Minimal RFC-4180-ish CSV parser — handles quoted fields (including
+// embedded commas, newlines, and escaped "" quotes), which a naive
+// text.split(',').split('\n') breaks on. Returns an array of row arrays;
+// the caller turns the first row into column headers.
+const parseCsv = (text) => {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else { inQuotes = false; }
+      } else {
+        field += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ',') {
+      row.push(field); field = '';
+    } else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); field = '';
+      if (row.some(f => f !== '')) rows.push(row);
+      row = [];
+    } else {
+      field += c;
+    }
+  }
+  if (field !== '' || row.length > 0) { row.push(field); rows.push(row); }
+  return rows;
+};
+
+// Product CSV import column -> camelCase field mapping. Accepts a few
+// common header spellings per column so a spreadsheet that already has
+// slightly different naming doesn't need to be reformatted first.
+const CSV_PRODUCT_FIELD_ALIASES = {
+  name: 'name', product: 'name', 'product name': 'name',
+  category: 'category',
+  subcategory: 'subcategory',
+  brand: 'brand',
+  sku: 'sku',
+  barcode: 'barcode',
+  weight: 'weight',
+  unit: 'unit',
+  packsize: 'packSize', 'pack size': 'packSize',
+  price: 'price', 'selling price': 'price',
+  mrp: 'mrp',
+  costprice: 'costPrice', 'cost price': 'costPrice',
+  discount: 'discount',
+  gstrate: 'gstRate', 'gst rate': 'gstRate', gst: 'gstRate',
+  hsncode: 'hsnCode', 'hsn code': 'hsnCode', hsn: 'hsnCode',
+  image: 'image', 'image url': 'image',
+  description: 'description',
+  instock: 'inStock', 'in stock': 'inStock',
+  ispublished: 'isPublished', 'is published': 'isPublished', published: 'isPublished',
+  wholesaleprice: 'wholesalePrice', 'wholesale price': 'wholesalePrice',
+};
+
+const csvRowsToProducts = (rows) => {
+  if (rows.length < 2) return [];
+  const headers = rows[0].map(h => CSV_PRODUCT_FIELD_ALIASES[h.trim().toLowerCase()] || null);
+  const boolFields = new Set(['inStock', 'isPublished']);
+  const numFields = new Set(['price', 'mrp', 'costPrice', 'discount', 'gstRate', 'wholesalePrice']);
+  return rows.slice(1).map(cells => {
+    const product = {};
+    headers.forEach((field, i) => {
+      if (!field) return;
+      const raw = (cells[i] ?? '').trim();
+      if (raw === '') return;
+      if (boolFields.has(field)) product[field] = ['true', '1', 'yes', 'y'].includes(raw.toLowerCase());
+      else if (numFields.has(field)) product[field] = Number(raw);
+      else product[field] = raw;
+    });
+    return product;
+  });
+};
+
 const ADMIN_ROLE_PERMISSIONS = {
   Owner: ['dashboard','inventory','sales-stats','orders','customers','reviews','cms','home-sections','products','retail-products','wholesale-products','offers','festive-offers','bestsellers','delivery-zones','min-order-value','broadcast','admins','activity-log'],
   'Super Admin': ['dashboard','inventory','sales-stats','orders','customers','reviews','cms','home-sections','products','retail-products','wholesale-products','offers','festive-offers','bestsellers','delivery-zones','min-order-value','broadcast'],
@@ -399,6 +479,42 @@ const Admin = () => {
   const [categoryDraft, setCategoryDraft] = useState({ name: '', image: '', color: '#F1F8E9' });
   const [categoryLoading, setCategoryLoading] = useState(false);
   const [imageUploading, setImageUploading] = useState(false);
+
+  // ── Bulk CSV product import ──
+  const csvFileInputRef = useRef(null);
+  const [csvImporting, setCsvImporting] = useState(false);
+  const [csvImportResult, setCsvImportResult] = useState(null);
+
+  const handleCsvFileSelected = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    setCsvImporting(true);
+    setCsvImportResult(null);
+    try {
+      const text = await file.text();
+      const rows = parseCsv(text);
+      const products = csvRowsToProducts(rows);
+      if (products.length === 0) {
+        alert('No product rows found in that CSV — check it has a header row plus at least one data row.');
+        return;
+      }
+      const result = await adminApi.bulkImportProducts(products);
+      setCsvImportResult(result);
+      if (result.successCount > 0) {
+        loadProductsFromDb();
+        loadInventory();
+        adminApi.fetchCategories().then(setDbCategories).catch(() => {});
+        broadcastSync(SYNC_EVENTS.SITE_DATA_CHANGED);
+        broadcastSync(SYNC_EVENTS.PRODUCTS_CHANGED);
+      }
+    } catch (err) {
+      alert(`Import failed: ${err.message}`);
+    } finally {
+      setCsvImporting(false);
+    }
+  };
 
   const [offers, setOffers] = useState([]);
   const [coupons, setCoupons] = useState([]);
@@ -5822,6 +5938,16 @@ const Admin = () => {
                     <button type="button" className="admin__ghost" onClick={() => setShowCategoryModal(true)}>
                       <FiLayers /> Add New Category
                     </button>
+                    <button type="button" className="admin__ghost" onClick={() => csvFileInputRef.current?.click()}>
+                      <FiFileText /> Import CSV
+                    </button>
+                    <input
+                      ref={csvFileInputRef}
+                      type="file"
+                      accept=".csv"
+                      style={{ display: 'none' }}
+                      onChange={handleCsvFileSelected}
+                    />
                     <button
                       type="button"
                       className="admin__primary"
@@ -5986,6 +6112,44 @@ const Admin = () => {
                       <button type="button" className="admin__primary" disabled={categoryLoading || imageUploading} onClick={saveCategory}>
                         {categoryLoading ? 'Saving...' : <><FiPlus /> Add Category</>}
                       </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {csvImporting && (
+                <div className="inventory-modal-backdrop">
+                  <div className="inventory-modal" style={{ maxWidth: '420px', textAlign: 'center', padding: '30px' }}>
+                    <p style={{ fontWeight: 700 }}>Importing products...</p>
+                    <p style={{ fontSize: '12px', color: '#687466' }}>This can take a little while for a large file — don't close this tab.</p>
+                  </div>
+                </div>
+              )}
+
+              {csvImportResult && (
+                <div className="inventory-modal-backdrop" onClick={() => setCsvImportResult(null)}>
+                  <div className="inventory-modal" style={{ maxWidth: '700px' }} onClick={e => e.stopPropagation()}>
+                    <div className="inventory-modal__header">
+                      <h2 style={{ margin: 0 }}>CSV Import Results</h2>
+                      <button className="inventory-modal__close" onClick={() => setCsvImportResult(null)}>✕</button>
+                    </div>
+                    <div className="inventory-modal__body">
+                      <p style={{ fontWeight: 700 }}>
+                        <span style={{ color: '#166534' }}>{csvImportResult.successCount} added</span>
+                        {csvImportResult.failCount > 0 && <span style={{ color: '#991B1B' }}> · {csvImportResult.failCount} failed</span>}
+                      </p>
+                      {csvImportResult.failCount > 0 && (
+                        <div style={{ maxHeight: '320px', overflowY: 'auto', marginTop: '10px' }}>
+                          {csvImportResult.results.filter(r => !r.success).map(r => (
+                            <div key={r.row} style={{ fontSize: '12px', padding: '6px 0', borderBottom: '1px solid #E1E6DC' }}>
+                              <strong>Row {r.row}</strong> ({r.name}): <span style={{ color: '#991B1B' }}>{r.error}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div className="inventory-modal__footer">
+                      <button type="button" className="admin__primary" onClick={() => setCsvImportResult(null)}>Done</button>
                     </div>
                   </div>
                 </div>
