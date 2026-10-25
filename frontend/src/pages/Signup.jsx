@@ -17,7 +17,9 @@ const Signup = () => {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [otp, setOtp] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -68,6 +70,10 @@ const Signup = () => {
     }
     if (password.length < 8) {
       setError('Password must be at least 8 characters.');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError('Passwords do not match.');
       return;
     }
 
@@ -153,6 +159,15 @@ const Signup = () => {
                 <input type={showPassword ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Min. 8 characters" required minLength={8} />
                 <button type="button" className="auth-field-eye" onClick={() => setShowPassword(p => !p)} aria-label="Toggle password visibility">
                   {showPassword ? <FiEyeOff /> : <FiEye />}
+                </button>
+              </div>
+            </label>
+            <label className="auth-field">
+              <span>Confirm Password</span>
+              <div className="auth-field-input">
+                <input type={showConfirmPassword ? 'text' : 'password'} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Re-enter your password" required minLength={8} />
+                <button type="button" className="auth-field-eye" onClick={() => setShowConfirmPassword(p => !p)} aria-label="Toggle confirm password visibility">
+                  {showConfirmPassword ? <FiEyeOff /> : <FiEye />}
                 </button>
               </div>
             </label>
