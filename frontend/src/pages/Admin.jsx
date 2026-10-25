@@ -1474,7 +1474,7 @@ const Admin = () => {
 
   const deleteCategoryHandler = async (cat) => {
     if (!cat || !cat.id) return;
-    if (!window.confirm(`Delete category "${cat.name}"? This also deletes all products in this category.`)) return;
+    if (!window.confirm(`Delete category "${cat.name}"? This only works if the category has no products left in it.`)) return;
     try {
       await adminApi.deleteCategory(cat.id);
       setDbCategories(prev => prev.filter(c => c.id !== cat.id));

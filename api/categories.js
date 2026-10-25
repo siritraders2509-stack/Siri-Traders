@@ -69,14 +69,18 @@ export default async function handler(req, res) {
       const { data: targetCat } = await supabase.from('categories').select('name').eq('id', catId).maybeSingle();
       const catName = targetCat?.name;
 
-      let deletedProducts = [];
-      try {
-        const delQuery = catName
-          ? supabase.from('products').delete().or(`category.eq.${catId},category.eq.${catName}`)
-          : supabase.from('products').delete().eq('category', catId);
-        const { data } = await delQuery.select('id');
-        deletedProducts = data || [];
-      } catch { /* best-effort, same as before */ }
+      // No more cascading product deletion — a category that still has
+      // products in it is refused, not silently wiped along with them.
+      // Move or delete those products first.
+      const countQuery = catName
+        ? supabase.from('products').select('id', { count: 'exact', head: true }).or(`category.eq.${catId},category.eq.${catName}`)
+        : supabase.from('products').select('id', { count: 'exact', head: true }).eq('category', catId);
+      const { count: productCount } = await countQuery;
+      if (productCount > 0) {
+        return res.status(400).json({
+          error: `This category still has ${productCount} product${productCount === 1 ? '' : 's'} in it. Move or delete them first, then delete the category.`,
+        });
+      }
 
       const { error } = await supabase.from('categories').delete().eq('id', catId);
       if (error) throw error;
@@ -88,10 +92,9 @@ export default async function handler(req, res) {
         entityId: catId,
         entityName: catName || catId,
         adminName: session?.name || session?.email,
-        details: { cascadedProductCount: deletedProducts.length, cascadedProductIds: deletedProducts.map(p => p.id) },
       });
 
-      return res.status(200).json({ success: true, id: catId, cascadedProductCount: deletedProducts.length });
+      return res.status(200).json({ success: true, id: catId });
     } catch (err) {
       console.error('Error deleting category:', err);
       return res.status(500).json({ error: `Failed to delete category: ${err.message}` });

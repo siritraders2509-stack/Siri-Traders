@@ -142,10 +142,17 @@ export default async function handler(req, res) {
           const { data: targetCat } = await supabase.from('categories').select('name').eq('id', catId).maybeSingle();
           const catName = targetCat?.name;
 
-          const delProducts = catName
-            ? supabase.from('products').delete().or(`category.eq.${catId},category.eq.${catName}`)
-            : supabase.from('products').delete().eq('category', catId);
-          await delProducts;
+          // No cascading product deletion — refuse if the category still
+          // has products, same as the main /api/categories route.
+          const countQuery = catName
+            ? supabase.from('products').select('id', { count: 'exact', head: true }).or(`category.eq.${catId},category.eq.${catName}`)
+            : supabase.from('products').select('id', { count: 'exact', head: true }).eq('category', catId);
+          const { count: productCount } = await countQuery;
+          if (productCount > 0) {
+            return res.status(400).json({
+              error: `This category still has ${productCount} product${productCount === 1 ? '' : 's'} in it. Move or delete them first, then delete the category.`,
+            });
+          }
 
           const { error } = await supabase.from('categories').delete().eq('id', catId);
           throwIfError(error);
