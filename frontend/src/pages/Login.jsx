@@ -51,7 +51,15 @@ const Login = () => {
         setError('Sign-in incomplete — please try again.');
       }
     } catch (err) {
-      setError(firstErrorMessage(err, 'Invalid email or password.'));
+      const msg = firstErrorMessage(err, 'Invalid email or password.');
+      // This account was created via Google (or another OAuth provider), so
+      // it has no password on file — Clerk's raw wording for that case is
+      // confusing, so point the user at the right sign-in method instead.
+      if (msg.toLowerCase().includes('verification strategy is not valid')) {
+        setError('This account uses Google Sign-In. Please use "Continue with Google" above instead of a password.');
+      } else {
+        setError(msg);
+      }
     } finally {
       setSubmitting(false);
     }
